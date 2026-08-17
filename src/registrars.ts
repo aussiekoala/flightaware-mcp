@@ -6,7 +6,7 @@ import { registerAircraftTools } from './tools/aircraft.js';
 import { registerScheduleTools } from './tools/schedules.js';
 import { registerAlertTools } from './tools/alerts.js';
 import { registerAccountTools } from './tools/account.js';
-import { withUsageFooter } from './usage.js';
+import { withUsageGuard } from './usage.js';
 
 /** Server name advertised to the host, shared by both transports. */
 export const SERVER_NAME = 'flightaware-mcp';
@@ -19,9 +19,10 @@ export const BANNER =
  * stdio server (src/index.ts) and the Cloudflare Worker (src/worker.ts) — so a
  * new tool module is wired into both by editing one list.
  *
- * Every registrar is wrapped so its tools append the AeroAPI spend-vs-credit
- * line to their results (see src/usage.ts). Wrapping here rather than in each
- * tool module means a new module gets the reporting for free.
+ * Every registrar is wrapped so its tools check the AeroAPI spend limit before
+ * running and append the spend-vs-credit line after (see src/usage.ts).
+ * Wrapping here rather than in each tool module means a new module inherits
+ * both — a tool can't be added that quietly escapes the budget.
  */
 export const TOOL_REGISTRARS: ToolRegistrar[] = [
   registerFlightTools,
@@ -31,7 +32,7 @@ export const TOOL_REGISTRARS: ToolRegistrar[] = [
   registerScheduleTools,
   registerAlertTools,
   registerAccountTools,
-].map(withUsageFooter);
+].map(withUsageGuard);
 
 /**
  * How many tools the roster registers. Surfaced by the Worker's /health so a

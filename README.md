@@ -50,9 +50,24 @@ AeroAPI charges per query at rates that differ by endpoint, so the meaningful nu
 
 That reading is memoised for `AEROAPI_USAGE_TTL` seconds (default 300), so a burst of tool calls costs at most one extra query per window. If the lookup fails — wrong tier, no key, a blip — the footer is silently omitted and your tool call is unaffected.
 
-Two caveats worth knowing. The footer is **reporting, not a cap**: it tells you where you stand, it does not refuse calls. And the `/account/usage` response shape is still **[verify-pending]** (see `docs/FLIGHTAWARE-API.md`) — the parser reads several plausible field names and prints nothing at all rather than guessing, so if you see no footer on a working key, that shape needs pinning.
+### Enforcing a ceiling
 
-For a hard ceiling, set a spend cap in the [AeroAPI portal](https://www.flightaware.com/aeroapi/portal/) — that is the only limit that actually stops the billing.
+Set `AEROAPI_SPEND_LIMIT` (USD) and the reading stops being advisory. Before any tool does its work, the server checks the month's spend; at or over the limit the call is **refused without ever reaching AeroAPI**, so a blocked call costs nothing:
+
+```
+AeroAPI spend limit reached: $5.00 spent this month, limit is $5.00. No AeroAPI call was made.
+```
+
+The gate is **off unless you set the limit**, and it **fails closed**: if a limit is set and spend cannot be verified — the endpoint errors, or returns a shape this server doesn't recognise — calls are blocked rather than waved through on an assumption, because an unverifiable budget is not a satisfied budget. `AEROAPI_ALLOW_UNVERIFIED_SPEND=true` opts out if your tier doesn't expose `/account/usage`.
+
+`fa_get_account_usage` is never gated, so you can always ask why you're blocked.
+
+Two things to understand about the guarantee:
+
+- **Enforcement granularity is the memo window.** Spend is re-read once per `AEROAPI_USAGE_TTL` (default 300s), not once per call, so the ceiling holds to within one window of activity. Shorten the TTL to tighten it, at the cost of more usage queries.
+- **This is a client-side gate.** It stops *this server* from spending. Only a cap in the [AeroAPI portal](https://www.flightaware.com/aeroapi/portal/) stops the billing itself — set both if the ceiling really matters.
+
+The `/account/usage` response shape is still **[verify-pending]** (see `docs/FLIGHTAWARE-API.md`). Confirm the footer appears on a real key before turning the gate on; with the shape unpinned and the gate enabled, fail-closed means everything blocks.
 
 ## Configuration
 
@@ -65,6 +80,8 @@ For a hard ceiling, set a spend cap in the [AeroAPI portal](https://www.flightaw
 | `AEROAPI_USAGE_FOOTER` | no | Append the spend line to every tool result (default: `true`; set `false` to switch off). |
 | `AEROAPI_USAGE_TTL` | no | Seconds to reuse a usage reading before spending another query on it (default: 300). |
 | `AEROAPI_FREE_CREDIT` | no | Monthly credit in USD the footer measures against (default: `5`, the Personal tier). |
+| `AEROAPI_SPEND_LIMIT` | no | Hard ceiling in USD. Unset = reporting only. Set = tool calls are refused at or over this month's spend, before any AeroAPI request is made. |
+| `AEROAPI_ALLOW_UNVERIFIED_SPEND` | no | Let calls through when spend can't be verified and a limit is set (default: `false` — fail closed). |
 
 ## Hosting on Cloudflare Workers
 

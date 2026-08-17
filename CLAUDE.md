@@ -35,6 +35,8 @@ AEROAPI_STATIC_CACHE_TTL=<secs> # Optional. Reference-data read-cache TTL (defau
 AEROAPI_USAGE_FOOTER=false      # Optional. Turn off the per-result spend line (default on)
 AEROAPI_USAGE_TTL=<secs>        # Optional. Usage-reading memo TTL (default 300)
 AEROAPI_FREE_CREDIT=<usd>       # Optional. Monthly credit the footer measures against (default 5)
+AEROAPI_SPEND_LIMIT=<usd>       # Optional. Hard ceiling — tools refuse at/over it. Unset = report only
+AEROAPI_ALLOW_UNVERIFIED_SPEND=true # Optional. Don't fail closed when spend is unreadable
 ```
 
 `client.get(path, { cache })` is backed by an in-memory cache keyed by full
@@ -91,10 +93,14 @@ there is no separate worker build step.
 - `src/tools/shared.ts` — path-segment guards (`FlightIdent`/`AirportCode`/
   `OperatorCode`/`AlertId`), pagination/date-window schemas, `qs()`, and the
   map-PNG writer (Node-only — guard calls with `hasFilesystem()`).
-- `src/usage.ts` — the per-result spend line. `withUsageFooter` proxies a
-  registrar's `registerTool` so every tool appends it; the reading is memoised
-  (`AEROAPI_USAGE_TTL`) and every failure is swallowed, because a usage lookup
-  must never turn a working tool call into an error.
+- `src/usage.ts` — usage reporting **and** the spend gate, off one memoised
+  reading. `withUsageGuard` proxies a registrar's `registerTool` so every tool
+  checks `AEROAPI_SPEND_LIMIT` before running and appends the spend line after.
+  Two rules pull in opposite directions and both matter: with **no** limit set a
+  usage failure is swallowed (it must never break a working call), but with a
+  limit set an unverifiable spend **fails closed** (an unverifiable budget is not
+  a satisfied budget). `fa_get_account_usage` is exempt from the gate so it stays
+  reachable while blocked.
 - `src/tools/{flights,airports,operators,aircraft,schedules,alerts,account}.ts` —
   each exports `register*Tools(server)`; `index.ts` wires them via `runMcp`.
 
