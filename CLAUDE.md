@@ -11,6 +11,11 @@ canonical, airport boards + counts + routes + delays + weather + nearby +
 canonical, operators, aircraft owner, scheduled flights, Foresight predictive
 search, and flight-alert management.
 
+Ships **two entrypoints over one tool roster**: `src/index.ts` (Node, stdio) and
+`src/worker.ts` (Cloudflare Workers, Streamable HTTP at `POST /mcp`). Both pull
+from `src/registrars.ts`, so a new tool module is wired into both by editing one
+list.
+
 Auth is an AeroAPI key (`AEROAPI_API_KEY`) sent in the **`x-apikey`** header —
 AeroAPI does **not** use `Authorization: Bearer`. This is the bearer/direct-API
 archetype: reads go through the fleet-shared `createApiClient` (configured with
@@ -22,7 +27,9 @@ and an empty body on delete (neither fits a JSON-only client). No fetchproxy.
 
 ```
 AEROAPI_API_KEY=<key>            # Required. Create at https://www.flightaware.com/aeroapi/portal/
-AEROAPI_OUTPUT_DIR=<dir>         # Optional. Where flight-map PNGs are written (default: cwd)
+MCP_AUTH_TOKEN=<token>          # Worker only. Bearer token callers must present; no token = 503
+MCP_ALLOW_ANONYMOUS=true        # Worker only. Opt out of the bearer gate (discouraged)
+AEROAPI_OUTPUT_DIR=<dir>         # Optional, Node only. Flight-map PNG dir (default: cwd)
 AEROAPI_CACHE_TTL=<secs>        # Optional. Live-data read-cache TTL (default 15; 0 disables)
 AEROAPI_STATIC_CACHE_TTL=<secs> # Optional. Reference-data read-cache TTL (default 3600; 0 disables)
 ```
@@ -36,18 +43,48 @@ operator info, `fa_list_*`, routes, aircraft owner, `fa_resolve_*`). Writes are
 never cached. Tier note: alerts, `fa_get_flight_history`, and the `fa_resolve_*`
 canonical tools require a Standard/Premium tier (Personal 401s).
 
-Loaded via `loadDotenvSafely` from `.env` next to `dist/` (failure swallowed —
-the .mcpb bundle has no dotenv). The config error is **deferred**: the server
-boots without a key and the actionable error surfaces on the first tool call,
-so the host's install-time `tools/list` probe still succeeds.
+Loaded via `loadDotenvSafely` from `.env` next to `dist/` **in `src/index.ts`
+only** (failure swallowed — the .mcpb bundle has no dotenv). It cannot live in
+`client.ts`: the Worker shares that module and forbids top-level I/O.
+
+The config error is **deferred**: the server boots without a key and the
+actionable error surfaces on the first tool call, so the host's install-time
+`tools/list` probe still succeeds. `FlightAwareClient`'s constructor therefore
+reads **nothing** from the environment — TTLs resolve on first use, and the key
+resolves on *every* call (a Worker isolate whose first request predated
+`wrangler secret put` must not cache the failure forever).
+
+### Cloudflare Workers
+
+`src/worker.ts` + `wrangler.toml`. Deployed by **Cloudflare Workers Builds** (repo
+connected in the CF dashboard; pushes to the production branch auto-deploy);
+`npm run deploy` is the manual path. Wrangler compiles `src/worker.ts` itself, so
+there is no separate worker build step.
+
+- **Stateless**: a fresh `McpServer` + `WebStandardStreamableHTTPServerTransport`
+  per request, `enableJsonResponse: true`, no sessions → no Durable Objects. The
+  JSON-response mode is what makes tearing the server down right after
+  `handleRequest` safe (the body is fully materialised, not a live stream).
+- **Fails closed**: `/mcp` needs `Authorization: Bearer $MCP_AUTH_TOKEN`; with no
+  token configured it 503s rather than serving openly, because AeroAPI bills per
+  query. `MCP_ALLOW_ANONYMOUS=true` overrides.
+- **Worker-only env**: `MCP_AUTH_TOKEN`, `MCP_ALLOW_ANONYMOUS`. Secrets go through
+  `wrangler secret put`, never `[vars]` (committed + dashboard-readable).
+- `/health` is unauthenticated and reports which secrets landed — the first thing
+  to check after a deploy.
 
 ## Layout
 
-- `src/client.ts` — `FlightAwareClient` (deferred config; `get()` reads via
+- `src/registrars.ts` — the shared tool roster + server name/banner. Both
+  entrypoints import it; add new tool modules here.
+- `src/runtime.ts` — the only place that knows Node and Workers differ: the env
+  source (`process.env` vs. request-scoped bindings, installed by `worker.ts`)
+  and `hasFilesystem()`.
+- `src/client.ts` — `FlightAwareClient` (lazy config; `get()` reads via
   `createApiClient`; `write()` raw fetch for mutations + Location parsing).
 - `src/tools/shared.ts` — path-segment guards (`FlightIdent`/`AirportCode`/
   `OperatorCode`/`AlertId`), pagination/date-window schemas, `qs()`, and the
-  map-PNG writer.
+  map-PNG writer (Node-only — guard calls with `hasFilesystem()`).
 - `src/tools/{flights,airports,operators,aircraft,schedules,alerts}.ts` — each
   exports `register*Tools(server)`; `index.ts` wires them via `runMcp`.
 

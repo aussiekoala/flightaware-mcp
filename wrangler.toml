@@ -1,0 +1,34 @@
+# Cloudflare Workers deployment for flightaware-mcp.
+#
+# Deploys via Cloudflare Workers Builds: connect this repo in the Cloudflare
+# dashboard (Workers & Pages → the Worker → Settings → Builds) and every push to
+# the production branch is built and deployed from this file. `npm run deploy`
+# does the same thing by hand.
+#
+# Wrangler compiles src/worker.ts directly (it bundles TypeScript itself), so
+# there is no separate build step for the Worker — `npm run build` remains the
+# Node/stdio build only.
+#
+# SECRETS — never add these under [vars], which is committed and dashboard-readable:
+#   wrangler secret put AEROAPI_API_KEY   # FlightAware AeroAPI key
+#   wrangler secret put MCP_AUTH_TOKEN    # shared bearer token callers must send
+
+name = "flightaware-mcp"
+main = "src/worker.ts"
+
+# nodejs_compat + a 2026 compatibility date give the Worker the Node built-ins
+# this codebase reaches for (node:fs is imported by the map-writing helper even
+# though the Worker never calls it) and populate process.env from bindings.
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+workers_dev = true
+
+[observability]
+enabled = true
+
+[vars]
+# Non-secret tuning knobs. AeroAPI bills per query, so these caches are the
+# difference between one billed call and twenty. Seconds; "0" disables.
+AEROAPI_CACHE_TTL = "15"
+AEROAPI_STATIC_CACHE_TTL = "3600"

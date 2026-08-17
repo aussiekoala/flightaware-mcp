@@ -51,6 +51,12 @@ scripts/
 # Runtime secrets
 .env
 .env.*
+.dev.vars
+.dev.vars.*
+
+# Cloudflare Workers deployment — irrelevant to the local stdio bundle
+wrangler.toml
+.wrangler/
 
 # Editor / OS noise
 .DS_Store

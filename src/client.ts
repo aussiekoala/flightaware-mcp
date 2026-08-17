@@ -1,7 +1,4 @@
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
-  loadDotenvSafely,
   readEnvVar,
   readTtlMsEnv,
   createApiClient,
@@ -11,11 +8,11 @@ import {
   type ApiClient,
   type ResponseCache,
 } from '@chrischall/mcp-utils';
+import { envSource } from './runtime.js';
 
-// Load .env for local dev; silently skip if dotenv is unavailable (e.g. the
-// .mcpb bundle). loadDotenvSafely never lets .env override a host-provided value.
-const __dirname = dirname(fileURLToPath(import.meta.url));
-await loadDotenvSafely({ path: join(__dirname, '..', '.env'), override: false });
+// NOTE: `.env` loading lives in the Node entrypoint (src/index.ts), not here.
+// This module is also imported by the Cloudflare Worker entrypoint, where
+// top-level I/O is forbidden and config arrives as request-scoped bindings.
 
 const BASE_URL = 'https://aeroapi.flightaware.com/aeroapi';
 const SERVICE = 'FlightAware AeroAPI';
@@ -42,38 +39,56 @@ export interface WriteResult<T = unknown> {
   data?: T;
 }
 
+/** Constructor knobs. Every one of them defaults to an env-derived value. */
+export interface FlightAwareClientOptions {
+  fetchImpl?: typeof fetch;
+  cacheTtlMs?: number;
+  staticCacheTtlMs?: number;
+  now?: () => number;
+}
+
+/** The cache + API client, built on first use (see {@link FlightAwareClient.wired}). */
+interface Wiring {
+  api: ApiClient;
+  cache: ResponseCache;
+}
+
 export class FlightAwareClient {
-  private readonly apiKey: string | null;
-  private readonly configError: Error | null;
-  private readonly api: ApiClient;
+  private readonly opts: FlightAwareClientOptions;
   private readonly fetchImpl: typeof fetch;
-  private readonly cache: ResponseCache;
+  private wiring: Wiring | null = null;
 
   /**
-   * Defer the config error so the server still boots (and answers the host's
-   * install-time tools/list probe) when AEROAPI_API_KEY isn't set yet. The
-   * error is re-raised at request time via requireKey().
+   * The constructor reads NOTHING from the environment — it just records the
+   * overrides. Config is resolved on first use so that (a) the server still
+   * boots and answers the host's install-time tools/list probe without
+   * AEROAPI_API_KEY, and (b) the Cloudflare Worker build works at all: a
+   * Worker's secrets don't exist at module-evaluation time, only once a request
+   * hands them to `fetch()` (see src/runtime.ts).
    */
-  constructor(opts: { fetchImpl?: typeof fetch; cacheTtlMs?: number; staticCacheTtlMs?: number; now?: () => number } = {}) {
-    const now = opts.now ?? Date.now;
-    const cacheTtlMs = opts.cacheTtlMs ?? readTtlMsEnv('AEROAPI_CACHE_TTL', DEFAULT_CACHE_TTL_MS);
-    const staticCacheTtlMs = opts.staticCacheTtlMs ?? readTtlMsEnv('AEROAPI_STATIC_CACHE_TTL', DEFAULT_STATIC_CACHE_TTL_MS);
-    this.cache = createResponseCache({ ttlMs: { dynamic: cacheTtlMs, static: staticCacheTtlMs }, now });
-    const key = readEnvVar('AEROAPI_API_KEY');
-    if (!key) {
-      this.apiKey = null;
-      this.configError = new McpToolError('AEROAPI_API_KEY environment variable is required', {
-        hint: 'Create an AeroAPI key at https://www.flightaware.com/aeroapi/portal/ and set AEROAPI_API_KEY in your MCP host env or .env (free Personal tier is fine to start).',
-      });
-    } else {
-      this.apiKey = key;
-      this.configError = null;
-    }
-    this.fetchImpl = opts.fetchImpl ?? fetch;
+  constructor(opts: FlightAwareClientOptions = {}) {
+    this.opts = opts;
+    // Wrapped rather than aliased: an unbound global `fetch` is not portable
+    // across runtimes.
+    this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+  }
+
+  /**
+   * Build (once) the response cache and API client. TTLs are read here rather
+   * than in the constructor so the Worker's request-scoped env is in place.
+   */
+  private wired(): Wiring {
+    if (this.wiring) return this.wiring;
+    const env = envSource();
+    const now = this.opts.now ?? Date.now;
+    const cacheTtlMs = this.opts.cacheTtlMs ?? readTtlMsEnv('AEROAPI_CACHE_TTL', DEFAULT_CACHE_TTL_MS, { env });
+    const staticCacheTtlMs =
+      this.opts.staticCacheTtlMs ?? readTtlMsEnv('AEROAPI_STATIC_CACHE_TTL', DEFAULT_STATIC_CACHE_TTL_MS, { env });
+    const cache = createResponseCache({ ttlMs: { dynamic: cacheTtlMs, static: staticCacheTtlMs }, now });
     // AeroAPI authenticates with the `x-apikey` header (NOT Authorization:
     // Bearer), so we pass tokenHeader. getToken defers the config error to
     // request time. retry once on 429; on* handlers keep actionable messages.
-    this.api = createApiClient({
+    const api = createApiClient({
       baseUrl: BASE_URL,
       serviceName: SERVICE,
       tokenHeader: 'x-apikey',
@@ -96,11 +111,23 @@ export class FlightAwareClient {
           hint: 'AeroAPI bills per query and rate-limits each tier — space out calls or check your usage in the portal.',
         }),
     });
+    this.wiring = { api, cache };
+    return this.wiring;
   }
 
+  /**
+   * Read the key at request time. Deliberately NOT memoised: a Worker isolate
+   * that took its first request before the secret was uploaded must pick the
+   * key up on the next one rather than serving a cached config error forever.
+   */
   private requireKey(): string {
-    if (this.configError) throw this.configError;
-    return this.apiKey!;
+    const key = readEnvVar('AEROAPI_API_KEY', { env: envSource() });
+    if (!key) {
+      throw new McpToolError('AEROAPI_API_KEY environment variable is required', {
+        hint: 'Create an AeroAPI key at https://www.flightaware.com/aeroapi/portal/ and set AEROAPI_API_KEY in your MCP host env or .env (free Personal tier is fine to start). On Cloudflare: `wrangler secret put AEROAPI_API_KEY`.',
+      });
+    }
+    return key;
   }
 
   /**
@@ -111,8 +138,9 @@ export class FlightAwareClient {
    * 'dynamic' tier (AEROAPI_CACHE_TTL) is for live data.
    */
   async get<T = unknown>(path: string, opts: { cache?: 'dynamic' | 'static' } = {}): Promise<T> {
+    const { api, cache } = this.wired();
     const tier = opts.cache === 'static' ? 'static' : 'dynamic';
-    return this.cache.fetchThrough(path, () => this.api.fetchJson<T>('GET', path), tier) as Promise<T>;
+    return cache.fetchThrough(path, () => api.fetchJson<T>('GET', path), tier) as Promise<T>;
   }
 
   /**

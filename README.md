@@ -2,7 +2,9 @@
 
 [![npm](https://img.shields.io/npm/v/@chrischall/flightaware-mcp)](https://www.npmjs.com/package/@chrischall/flightaware-mcp)
 
-MCP server for **FlightAware AeroAPI** (v4) — live flight tracking and aviation data for Claude. Track flights, read airport boards, look up operators and aircraft, fetch scheduled flights, and manage flight alerts, all over stdio.
+MCP server for **FlightAware AeroAPI** (v4) — live flight tracking and aviation data for Claude. Track flights, read airport boards, look up operators and aircraft, fetch scheduled flights, and manage flight alerts.
+
+Runs two ways from one codebase: **locally over stdio** (npx/mcpb), or **hosted on Cloudflare Workers** as a remote MCP server over Streamable HTTP.
 
 > Developed and maintained by AI (Claude Code). Use at your own discretion.
 
@@ -42,6 +44,68 @@ Alert mutations are **confirm-gated**: without `confirm: true` they return a dry
 | `AEROAPI_OUTPUT_DIR` | no | Default directory for flight-map PNGs (default: cwd). |
 | `AEROAPI_CACHE_TTL` | no | Seconds to cache identical **live-data** GET responses (default: 15; `0` disables). Cuts AeroAPI per-query billing. |
 | `AEROAPI_STATIC_CACHE_TTL` | no | Longer TTL for **reference data** — airport/operator info, routes, ownership, canonical lookups (default: 3600; `0` disables). |
+
+## Hosting on Cloudflare Workers
+
+The same 33 tools are served over MCP Streamable HTTP at `POST /mcp` by `src/worker.ts`. The deployment is **stateless** — each request builds its own server and transport, so no Durable Objects or KV are needed.
+
+### 1. Set the secrets
+
+```bash
+npm install
+npx wrangler login                      # once, to link your Cloudflare account
+
+npx wrangler secret put AEROAPI_API_KEY  # paste your AeroAPI key at the prompt
+npx wrangler secret put MCP_AUTH_TOKEN   # paste a token: openssl rand -hex 32
+```
+
+Both are **secrets**, never `[vars]` — `wrangler.toml` is committed, and `[vars]` are readable from the dashboard. `npm run cf:secrets` runs both prompts back to back.
+
+### 2. Deploy
+
+Deployment is wired through **Cloudflare Workers Builds**: connect this repo in the Cloudflare dashboard (*Workers & Pages → flightaware-mcp → Settings → Builds*), and every push to the production branch builds and deploys from `wrangler.toml`. No GitHub secrets or CI workflow needed — Cloudflare pulls the repo itself.
+
+To deploy by hand (first deploy, or a hotfix): `npm run deploy`.
+
+Verify a deploy without authenticating — `/health` reports whether each secret actually landed:
+
+```bash
+curl https://flightaware-mcp.<your-subdomain>.workers.dev/health
+# {"status":"ok","version":"0.3.4","endpoint":"/mcp","aeroapi_key":"configured","auth":"bearer", …}
+```
+
+### 3. Point a client at it
+
+```json
+{
+  "mcpServers": {
+    "flightaware": {
+      "type": "http",
+      "url": "https://flightaware-mcp.<your-subdomain>.workers.dev/mcp",
+      "headers": { "Authorization": "Bearer <your MCP_AUTH_TOKEN>" }
+    }
+  }
+}
+```
+
+### Auth, and why it fails closed
+
+AeroAPI bills per query, so a public URL carrying your key is a bill anyone can run up. Every request to `/mcp` must present `Authorization: Bearer <MCP_AUTH_TOKEN>`; anything else gets a `401`. If `MCP_AUTH_TOKEN` is not set at all, the Worker returns `503` and serves nothing rather than defaulting to open — set `MCP_ALLOW_ANONYMOUS=true` to override that, which is only sane behind Cloudflare Access or a private route.
+
+### Local development
+
+```bash
+cp .dev.vars.example .dev.vars    # fill in both values; .dev.vars is gitignored
+npm run worker:dev                # runs the Worker on http://127.0.0.1:8787 via workerd
+```
+
+### Differences from the stdio build
+
+| | stdio | Worker |
+| --- | --- | --- |
+| Config source | `process.env` + `.env` | request-scoped bindings/secrets |
+| `fa_get_flight_map` | writes a PNG, returns the path | returns the image inline (no durable disk) |
+| `AEROAPI_OUTPUT_DIR` | honoured | ignored |
 
 ## Development
 

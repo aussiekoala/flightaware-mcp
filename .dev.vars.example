@@ -1,0 +1,10 @@
+# Local-only secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
+# `.dev.vars` is gitignored and is NEVER uploaded — deployed secrets are set
+# separately with `wrangler secret put <NAME>`.
+
+# FlightAware AeroAPI key — https://www.flightaware.com/aeroapi/portal/
+AEROAPI_API_KEY=
+
+# Shared bearer token every MCP client must send as `Authorization: Bearer <token>`.
+# Generate one with: openssl rand -hex 32
+MCP_AUTH_TOKEN=

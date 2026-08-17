@@ -4,6 +4,7 @@ import { textResult, McpToolError } from '@chrischall/mcp-utils';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { client } from '../client.js';
 import { FlightIdent, pageParams, dateWindowParams, qs, resolveOutputDir, writePng } from './shared.js';
+import { hasFilesystem } from '../runtime.js';
 
 export function registerFlightTools(server: McpServer): void {
   server.registerTool(
@@ -111,7 +112,7 @@ export function registerFlightTools(server: McpServer): void {
     'fa_get_flight_map',
     {
       description:
-        'Get a rendered map image (PNG) of a flight by fa_flight_id. Writes the PNG to disk (default: $AEROAPI_OUTPUT_DIR or cwd) and returns the path, or returns it inline as base64 when inline:true.',
+        'Get a rendered map image (PNG) of a flight by fa_flight_id. Writes the PNG to disk (default: $AEROAPI_OUTPUT_DIR or cwd) and returns the path, or returns it inline as base64 when inline:true. On a remote/hosted deployment there is no local disk, so the image is always returned inline.',
       annotations: { readOnlyHint: true, openWorldHint: true },
       inputSchema: {
         id: FlightIdent.describe('fa_flight_id of the flight'),
@@ -130,7 +131,10 @@ export function registerFlightTools(server: McpServer): void {
           hint: 'The fa_flight_id may be invalid or have no positions yet.',
         });
       }
-      if (inline) {
+      // Hosted runtimes (the Cloudflare Worker) have no durable filesystem, so
+      // "write it and return a path" would hand back a path to nothing. Return
+      // the image itself instead — the caller gets the same picture either way.
+      if (inline || !hasFilesystem()) {
         return { content: [{ type: 'image', data: base64, mimeType: 'image/png' }] };
       }
       const dir = resolveOutputDir(output_dir);

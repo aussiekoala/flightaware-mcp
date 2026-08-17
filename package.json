@@ -39,6 +39,10 @@
     "build": "tsc && npm run bundle",
     "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --external:dotenv --outfile=dist/bundle.js",
     "dev": "node dist/index.js",
+    "worker:dev": "wrangler dev",
+    "worker:typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "cf:secrets": "wrangler secret put AEROAPI_API_KEY && wrangler secret put MCP_AUTH_TOKEN",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -54,7 +58,8 @@
     "@vitest/coverage-v8": "^4.1.2",
     "esbuild": "^0.28.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.2"
+    "vitest": "^4.1.2",
+    "wrangler": "^4.123.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true

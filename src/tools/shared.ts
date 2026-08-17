@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { buildQueryString, readEnvVar, expandPath } from '@chrischall/mcp-utils';
+import { envSource } from '../runtime.js';
 
 /**
  * Flight ident / id (designator like `UAL123`, registration `N12345`, or an
@@ -56,9 +57,13 @@ export function qs(params: Record<string, unknown>): string {
   return buildQueryString(params);
 }
 
-/** Resolve the directory map PNGs are written to: arg → $AEROAPI_OUTPUT_DIR → cwd. */
+/**
+ * Resolve the directory map PNGs are written to: arg → $AEROAPI_OUTPUT_DIR → cwd.
+ * Node-only — callers must check `hasFilesystem()` first (the Worker build has
+ * nowhere durable to write and returns the image inline instead).
+ */
 export function resolveOutputDir(dir?: string): string {
-  const chosen = dir ?? readEnvVar('AEROAPI_OUTPUT_DIR') ?? process.cwd();
+  const chosen = dir ?? readEnvVar('AEROAPI_OUTPUT_DIR', { env: envSource() }) ?? process.cwd();
   const abs = isAbsolute(chosen) ? chosen : resolve(process.cwd(), expandPath(chosen));
   if (!existsSync(abs)) mkdirSync(abs, { recursive: true });
   return abs;
