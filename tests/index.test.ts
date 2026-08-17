@@ -1,21 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { createTestHarness } from '@chrischall/mcp-utils/test';
-import { registerFlightTools } from '../src/tools/flights.js';
-import { registerAirportTools } from '../src/tools/airports.js';
-import { registerOperatorTools } from '../src/tools/operators.js';
-import { registerAircraftTools } from '../src/tools/aircraft.js';
-import { registerScheduleTools } from '../src/tools/schedules.js';
-import { registerAlertTools } from '../src/tools/alerts.js';
+import { TOOL_COUNT, TOOL_REGISTRARS } from '../src/registrars.js';
 
 describe('tool roster', () => {
+  // Driven by the shared roster (not a hand-copied list of registrars) so a
+  // module wired into src/registrars.ts is covered here automatically — and so
+  // both entrypoints are asserting the same thing.
   it('registers exactly the expected tools', async () => {
     const h = await createTestHarness((s) => {
-      registerFlightTools(s);
-      registerAirportTools(s);
-      registerOperatorTools(s);
-      registerAircraftTools(s);
-      registerScheduleTools(s);
-      registerAlertTools(s);
+      for (const register of TOOL_REGISTRARS) register(s, undefined);
     });
     const names = (await h.listTools()).map((t) => t.name).sort();
     expect(names).toEqual([
@@ -23,6 +16,7 @@ describe('tool roster', () => {
       'fa_create_alert',
       'fa_delete_alert',
       'fa_foresight_search',
+      'fa_get_account_usage',
       'fa_get_aircraft_owner',
       'fa_get_airport',
       'fa_get_airport_delays',
@@ -53,6 +47,15 @@ describe('tool roster', () => {
       'fa_set_alerts_endpoint',
       'fa_update_alert',
     ]);
+    await h.close();
+  });
+
+  it('TOOL_COUNT matches what is actually registered', async () => {
+    // /health advertises TOOL_COUNT; this is what stops that number drifting.
+    const h = await createTestHarness((s) => {
+      for (const register of TOOL_REGISTRARS) register(s, undefined);
+    });
+    expect((await h.listTools()).length).toBe(TOOL_COUNT);
     await h.close();
   });
 });

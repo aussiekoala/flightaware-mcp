@@ -5,7 +5,7 @@ Guidance for Claude working in this repo.
 ## TL;DR
 
 **FlightAware AeroAPI** (v4) MCP server. Wraps the AeroAPI REST API
-(`https://aeroapi.flightaware.com/aeroapi`) and exposes 33 tools to Claude over
+(`https://aeroapi.flightaware.com/aeroapi`) and exposes 34 tools to Claude over
 stdio: flight lookup/search/positions/count/track/position/route/map/history/
 canonical, airport boards + counts + routes + delays + weather + nearby +
 canonical, operators, aircraft owner, scheduled flights, Foresight predictive
@@ -32,6 +32,9 @@ MCP_ALLOW_ANONYMOUS=true        # Worker only. Opt out of the bearer gate (disco
 AEROAPI_OUTPUT_DIR=<dir>         # Optional, Node only. Flight-map PNG dir (default: cwd)
 AEROAPI_CACHE_TTL=<secs>        # Optional. Live-data read-cache TTL (default 15; 0 disables)
 AEROAPI_STATIC_CACHE_TTL=<secs> # Optional. Reference-data read-cache TTL (default 3600; 0 disables)
+AEROAPI_USAGE_FOOTER=false      # Optional. Turn off the per-result spend line (default on)
+AEROAPI_USAGE_TTL=<secs>        # Optional. Usage-reading memo TTL (default 300)
+AEROAPI_FREE_CREDIT=<usd>       # Optional. Monthly credit the footer measures against (default 5)
 ```
 
 `client.get(path, { cache })` is backed by an in-memory cache keyed by full
@@ -88,8 +91,12 @@ there is no separate worker build step.
 - `src/tools/shared.ts` — path-segment guards (`FlightIdent`/`AirportCode`/
   `OperatorCode`/`AlertId`), pagination/date-window schemas, `qs()`, and the
   map-PNG writer (Node-only — guard calls with `hasFilesystem()`).
-- `src/tools/{flights,airports,operators,aircraft,schedules,alerts}.ts` — each
-  exports `register*Tools(server)`; `index.ts` wires them via `runMcp`.
+- `src/usage.ts` — the per-result spend line. `withUsageFooter` proxies a
+  registrar's `registerTool` so every tool appends it; the reading is memoised
+  (`AEROAPI_USAGE_TTL`) and every failure is swallowed, because a usage lookup
+  must never turn a working tool call into an error.
+- `src/tools/{flights,airports,operators,aircraft,schedules,alerts,account}.ts` —
+  each exports `register*Tools(server)`; `index.ts` wires them via `runMcp`.
 
 ## Conventions
 
@@ -101,6 +108,9 @@ there is no separate worker build step.
 - **Verify before trusting a shape.** Many response shapes are coded from the
   documented v4 surface and marked **[verify-pending]** in `docs/FLIGHTAWARE-API.md`
   — re-verify against a real 200 (free Personal key) before treating as confirmed.
+- **Spend, not call count.** AeroAPI prices per endpoint and the Personal tier
+  includes $5/month of credit, so there is no "N calls/month" figure — anything
+  claiming one is wrong. Track dollars via `/account/usage`.
 - TDD; mock the network in tests. Don't hand-bump the version (release-please).
 
 ## Pull requests & release notes

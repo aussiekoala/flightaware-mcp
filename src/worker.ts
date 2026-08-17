@@ -17,7 +17,7 @@ import { readEnvVar, parseBoolEnv } from '@chrischall/mcp-utils';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { createMcpServer } from '@chrischall/mcp-utils';
 import { VERSION } from './version.js';
-import { SERVER_NAME, TOOL_REGISTRARS } from './registrars.js';
+import { SERVER_NAME, TOOL_COUNT, TOOL_REGISTRARS } from './registrars.js';
 import { setEnvSource, setFilesystemAvailable, type EnvSource } from './runtime.js';
 
 /**
@@ -183,7 +183,7 @@ export default {
         version: VERSION,
         transport: 'streamable-http',
         endpoint: MCP_PATH,
-        tools: 33,
+        tools: TOOL_COUNT,
         aeroapi_key: readEnvVar('AEROAPI_API_KEY', { env }) ? 'configured' : 'missing',
         auth: readEnvVar('MCP_AUTH_TOKEN', { env })
           ? 'bearer'

@@ -22,7 +22,7 @@ Runs two ways from one codebase: **locally over stdio** (npx/mcpb), or **hosted 
 }
 ```
 
-Get a key at [flightaware.com/aeroapi/portal](https://www.flightaware.com/aeroapi/portal/). The free **Personal** tier (500 calls/month) is enough to start; AeroAPI bills per query.
+Get a key at [flightaware.com/aeroapi/portal](https://www.flightaware.com/aeroapi/portal/). AeroAPI bills **per query at per-endpoint rates**, and the **Personal** tier includes **$5/month of free credit** — so what you have left is a dollar figure, not a call count. Every tool result carries a one-line reminder of where you stand (see [Usage and spend](#usage-and-spend)).
 
 ## Tools
 
@@ -33,8 +33,26 @@ Get a key at [flightaware.com/aeroapi/portal](https://www.flightaware.com/aeroap
 | Operators / aircraft | `fa_get_operator`, `fa_get_operator_flights`, `fa_list_operators`, `fa_get_aircraft_owner` |
 | Schedules / predictive | `fa_get_scheduled_flights`, `fa_foresight_search` (premium tier) |
 | Alerts | `fa_list_alerts`, `fa_get_alert`, `fa_create_alert`, `fa_update_alert`, `fa_delete_alert`, `fa_get_alerts_endpoint`, `fa_set_alerts_endpoint` |
+| Account | `fa_get_account_usage` |
 
 Alert mutations are **confirm-gated**: without `confirm: true` they return a dry-run preview and make no network call.
+
+## Usage and spend
+
+AeroAPI charges per query at rates that differ by endpoint, so the meaningful number is **dollars spent against your monthly credit**, not calls made. Two things surface it:
+
+- **`fa_get_account_usage`** reads `GET /account/usage` on demand, defaulting to the current calendar month — the window the credit resets on.
+- **Every other tool result ends with a usage line**, so the balance travels with whatever you were already doing rather than needing a separate question:
+
+  ```
+  — AeroAPI usage: $1.23 spent this month · $3.77 of $5.00 credit remaining · 42 queries
+  ```
+
+That reading is memoised for `AEROAPI_USAGE_TTL` seconds (default 300), so a burst of tool calls costs at most one extra query per window. If the lookup fails — wrong tier, no key, a blip — the footer is silently omitted and your tool call is unaffected.
+
+Two caveats worth knowing. The footer is **reporting, not a cap**: it tells you where you stand, it does not refuse calls. And the `/account/usage` response shape is still **[verify-pending]** (see `docs/FLIGHTAWARE-API.md`) — the parser reads several plausible field names and prints nothing at all rather than guessing, so if you see no footer on a working key, that shape needs pinning.
+
+For a hard ceiling, set a spend cap in the [AeroAPI portal](https://www.flightaware.com/aeroapi/portal/) — that is the only limit that actually stops the billing.
 
 ## Configuration
 
@@ -44,10 +62,13 @@ Alert mutations are **confirm-gated**: without `confirm: true` they return a dry
 | `AEROAPI_OUTPUT_DIR` | no | Default directory for flight-map PNGs (default: cwd). |
 | `AEROAPI_CACHE_TTL` | no | Seconds to cache identical **live-data** GET responses (default: 15; `0` disables). Cuts AeroAPI per-query billing. |
 | `AEROAPI_STATIC_CACHE_TTL` | no | Longer TTL for **reference data** — airport/operator info, routes, ownership, canonical lookups (default: 3600; `0` disables). |
+| `AEROAPI_USAGE_FOOTER` | no | Append the spend line to every tool result (default: `true`; set `false` to switch off). |
+| `AEROAPI_USAGE_TTL` | no | Seconds to reuse a usage reading before spending another query on it (default: 300). |
+| `AEROAPI_FREE_CREDIT` | no | Monthly credit in USD the footer measures against (default: `5`, the Personal tier). |
 
 ## Hosting on Cloudflare Workers
 
-The same 33 tools are served over MCP Streamable HTTP at `POST /mcp` by `src/worker.ts`. The deployment is **stateless** — each request builds its own server and transport, so no Durable Objects or KV are needed.
+The same 34 tools are served over MCP Streamable HTTP at `POST /mcp` by `src/worker.ts`. The deployment is **stateless** — each request builds its own server and transport, so no Durable Objects or KV are needed.
 
 ### 1. Set the secrets
 

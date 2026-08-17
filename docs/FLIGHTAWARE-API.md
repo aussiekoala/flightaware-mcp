@@ -75,9 +75,26 @@ never cached.
   NOT `Authorization: Bearer`. We use `createApiClient({ tokenHeader: 'x-apikey' })`.
 - **Response:** `application/json; charset=UTF-8`. Paged collections carry a
   `links.next` containing an opaque `cursor`; pass it back as `?cursor=`.
-- **Rate/quota:** billed per query; free Personal tier = 500/mo. A `401` means a
-  bad/missing key; `402`/`403` typically means the endpoint/feature is not in
-  your subscription tier (notably **Foresight** and some premium boards).
+- **Rate/quota:** billed **per query, priced per endpoint** — different endpoints
+  cost different amounts, so there is no single "N calls/month" number. The
+  Personal tier includes **$5/month of free credit**, drawn down at those
+  per-endpoint rates. (An earlier revision of this doc said "500/mo"; that was
+  $5 ÷ an assumed flat $0.01/query presented as if it were the billing model.
+  It isn't — track spend, not call count, via `GET /account/usage`.) A `401`
+  means a bad/missing key; `402`/`403` typically means the endpoint/feature is
+  not in your subscription tier (notably **Foresight** and some premium boards).
+
+## Account usage — `GET /account/usage` **[verify-pending]**
+
+Reports spend for a date window; the basis for `fa_get_account_usage` and the
+per-response usage footer. Query params `start` / `end` (ISO-8601 dates); we
+default to the current calendar month so the figure lines up with the monthly
+free credit.
+
+Response shape is **not yet verified against a real 200** — the parser reads
+`total_cost`/`cost` and `total_calls`/`calls` defensively and omits the footer
+entirely rather than printing a guess when neither is present. Pin this section
+the first time a real response is seen.
 
 ## Common query params
 

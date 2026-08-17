@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import worker, { authorize, type WorkerEnv } from '../src/worker.js';
+import { TOOL_COUNT } from '../src/registrars.js';
 import { resetEnvSource, setFilesystemAvailable } from '../src/runtime.js';
 
 // The Worker installs its request-scoped bindings into the shared runtime
@@ -124,7 +125,8 @@ describe('worker MCP endpoint', () => {
   it('serves the full tool roster over HTTP', async () => {
     const { json } = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const names = (json.result.tools as { name: string }[]).map((t) => t.name);
-    expect(names).toHaveLength(33);
+    expect(names).toHaveLength(TOOL_COUNT);
+    expect(names).toContain('fa_get_account_usage');
     expect(names).toContain('fa_get_flights');
     expect(names).toContain('fa_create_alert');
   });
