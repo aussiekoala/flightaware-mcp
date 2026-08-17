@@ -101,8 +101,10 @@ export function primeUsage(data: unknown): void {
  *    all of today is excluded. Returned 0 calls on a day that had activity.
  *  - `end` as a past datetime (`2026-08-17T20:00:00Z`) → today's usage counted.
  *
- * Hence a datetime, one minute back. The skew matters because `end` must be
- * strictly before AeroAPI's idea of now, and our clock is not theirs.
+ * Hence a datetime, one minute back, truncated to whole seconds (see
+ * {@link isoSeconds} — fractional seconds crash AeroAPI's backend with a 500).
+ * The skew matters because `end` must be strictly before AeroAPI's idea of
+ * now, and our clock is not theirs.
  *
  * Edge case: inside the first minute of a UTC month, `now - skew` precedes the
  * month start, so the window clamps to zero width. Month-to-date spend is zero
@@ -111,7 +113,18 @@ export function primeUsage(data: unknown): void {
 export function currentMonthWindow(now: Date = new Date()): { start: string; end: string } {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const end = new Date(Math.max(start.getTime(), now.getTime() - END_SKEW_MS));
-  return { start: start.toISOString(), end: end.toISOString() };
+  return { start: isoSeconds(start), end: isoSeconds(end) };
+}
+
+/**
+ * ISO-8601 truncated to whole seconds — `2026-08-17T21:33:00Z`, never
+ * `...:00.417Z`. AeroAPI's backend faults with `500 Appfault` on non-zero
+ * fractional seconds (verified live 2026-08-17: `.000Z` → 200, `.417Z` → 500,
+ * same query otherwise), and `Date.toISOString()` always emits milliseconds.
+ * Deterministic, not a transient outage — so we simply never send them.
+ */
+function isoSeconds(d: Date): string {
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 /**

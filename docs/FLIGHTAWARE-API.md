@@ -121,9 +121,16 @@ Notes that matter for the gate:
   - `end` as a past datetime (`2026-08-17T20:00:00Z`) → that day's usage is
     counted (`total_calls: 1`).
 
-  `currentMonthWindow()` therefore sends full datetimes with `end` one minute
-  behind now — the skew covers clock drift against AeroAPI, since `end` must be
-  strictly before *their* now.
+  - `end` with **non-zero fractional seconds** (`21:33:00.417Z`) → **500
+    Appfault** ("Backend processing error"). Deterministic, not transient —
+    `.000Z` and secondless forms return 200 for the same query. Verified by
+    A/B probes seconds apart, live 2026-08-17. `Date.toISOString()` always
+    emits milliseconds, so an un-truncated window faults on essentially every
+    real call.
+
+  `currentMonthWindow()` therefore sends whole-second datetimes with `end` one
+  minute behind now — the skew covers clock drift against AeroAPI, since `end`
+  must be strictly before *their* now.
 - **`/account/usage` is itself free**: `resource_cost: 0` in `resource_details`.
   Reading the meter costs nothing, so the usage footer and the spend gate are
   free to run.

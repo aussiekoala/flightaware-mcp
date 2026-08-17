@@ -101,14 +101,24 @@ describe('formatUsage', () => {
 });
 
 describe('currentMonthWindow', () => {
-  it('sends datetimes, with end a minute in the PAST', () => {
-    // Verified live: AeroAPI 400s on any end >= now, and a bare date is read as
-    // midnight (dropping all of today). Both bounds must be datetimes, and end
-    // must trail now.
+  it('sends whole-second datetimes, with end a minute in the PAST', () => {
+    // Verified live: AeroAPI 400s on any end >= now, a bare date is read as
+    // midnight (dropping all of today), and non-zero fractional seconds crash
+    // its backend with a 500 Appfault. Datetimes, seconds precision, trailing
+    // now.
     expect(currentMonthWindow(new Date('2026-08-17T09:00:00Z'))).toEqual({
-      start: '2026-08-01T00:00:00.000Z',
-      end: '2026-08-17T08:59:00.000Z',
+      start: '2026-08-01T00:00:00Z',
+      end: '2026-08-17T08:59:00Z',
     });
+  });
+
+  it('NEVER emits fractional seconds — non-zero milliseconds 500 AeroAPI', () => {
+    // Date.toISOString() always carries milliseconds; a real clock essentially
+    // never lands on .000, so an un-truncated window faults on every call.
+    const { start, end } = currentMonthWindow(new Date('2026-08-17T09:00:00.417Z'));
+    expect(start).not.toMatch(/\./);
+    expect(end).not.toMatch(/\./);
+    expect(end).toBe('2026-08-17T08:59:00Z');
   });
 
   it('NEVER sends an end in the future — the bug that took every tool offline', () => {
@@ -122,15 +132,15 @@ describe('currentMonthWindow', () => {
 
   it('clamps to the month start inside the first minute of a month', () => {
     expect(currentMonthWindow(new Date('2026-09-01T00:00:30Z'))).toEqual({
-      start: '2026-09-01T00:00:00.000Z',
-      end: '2026-09-01T00:00:00.000Z',
+      start: '2026-09-01T00:00:00Z',
+      end: '2026-09-01T00:00:00Z',
     });
   });
 
   it('keeps the window inside the current month across a rollover', () => {
     expect(currentMonthWindow(new Date('2026-08-31T23:30:00Z'))).toEqual({
-      start: '2026-08-01T00:00:00.000Z',
-      end: '2026-08-31T23:29:00.000Z',
+      start: '2026-08-01T00:00:00Z',
+      end: '2026-08-31T23:29:00Z',
     });
   });
 });
