@@ -112,10 +112,21 @@ Notes that matter for the gate:
   the gross number errs toward blocking early, which is the correct bias for a
   budget. Revisit once a non-zero month is available to compare against the
   portal's own figure.
-- **`end` is treated as exclusive**, so `currentMonthWindow()` asks for
-  *tomorrow*. `end = today` would silently omit today's spend — the newest and
-  most decision-relevant usage. Harmless if the bound turns out to be inclusive,
-  since there is no future usage to return.
+- **`end` must be a past ISO-8601 *datetime*.** Verified live 2026-08-17:
+  - `end` in the future → `400 "start or end datetime must be before current
+    datetime"`. There is no tolerance for "tomorrow".
+  - `end` as a bare date (`2026-08-17`) → read as that day's **midnight**, so
+    all of that day is excluded; returned `total_calls: 0` on a day with
+    activity.
+  - `end` as a past datetime (`2026-08-17T20:00:00Z`) → that day's usage is
+    counted (`total_calls: 1`).
+
+  `currentMonthWindow()` therefore sends full datetimes with `end` one minute
+  behind now — the skew covers clock drift against AeroAPI, since `end` must be
+  strictly before *their* now.
+- **`/account/usage` is itself free**: `resource_cost: 0` in `resource_details`.
+  Reading the meter costs nothing, so the usage footer and the spend gate are
+  free to run.
 - `resource_details[]` carries the per-endpoint breakdown; `fa_get_account_usage`
   returns it verbatim, and the footer ignores it.
 

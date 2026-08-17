@@ -49,15 +49,28 @@ export interface UsageReading {
  */
 const FAILURE_TTL_MS = 15_000;
 
+/** Seconds to step `end` back from now, absorbing clock skew against AeroAPI. */
+const END_SKEW_MS = 60_000;
+
+/**
+ * How long a last-known-good reading keeps the gate open after the meter
+ * breaks, and how much headroom that reading needs. See {@link enforceSpendLimit}.
+ */
+const GRACE_MS = 900_000;
+const GRACE_HEADROOM = 0.9;
+
 type Memo = { reading: UsageReading | null; failure: string | null; at: number };
 
 let memo: Memo | null = null;
+/** The most recent reading that actually succeeded — the grace window's basis. */
+let lastGood: { reading: UsageReading; at: number } | null = null;
 /** The read currently in flight, so parallel tool calls share one query. */
 let inFlight: Promise<Memo> | null = null;
 
 /** Reset the memoised reading (test hook). */
 export function resetUsageCache(): void {
   memo = null;
+  lastGood = null;
   inFlight = null;
 }
 
@@ -71,21 +84,43 @@ export function primeUsage(data: unknown): void {
   const reading = parseUsage(data);
   if (!reading) return;
   memo = { reading, failure: null, at: Date.now() };
+  lastGood = { reading, at: memo.at };
 }
 
 /**
- * The current billing window in UTC: first of the month → **tomorrow**.
+ * The current billing window in UTC: first of the month → a moment ago.
  *
- * The end date is deliberately one day ahead of today. AeroAPI's `end` is
- * treated as exclusive, so `end = today` reports everything except today —
- * which for a spend gate is the worst possible error, silently omitting the
- * most recent (and most likely to matter) spend. Asking for tomorrow costs
- * nothing if the bound is inclusive, since there is no future usage to return.
+ * Both bounds are full ISO-8601 **datetimes**, not bare dates. Verified against
+ * the live API on 2026-08-17:
+ *
+ *  - `end` in the future → `400 "start or end datetime must be before current
+ *    datetime"`. AeroAPI rejects it outright; there is no tolerance for
+ *    "tomorrow". An earlier revision sent tomorrow, and because the spend gate
+ *    fails closed, that single bad parameter took every tool offline.
+ *  - `end` as a bare date (`2026-08-17`) → parsed as that day's midnight, so
+ *    all of today is excluded. Returned 0 calls on a day that had activity.
+ *  - `end` as a past datetime (`2026-08-17T20:00:00Z`) → today's usage counted.
+ *
+ * Hence a datetime, one minute back. The skew matters because `end` must be
+ * strictly before AeroAPI's idea of now, and our clock is not theirs.
+ *
+ * Edge case: inside the first minute of a UTC month, `now - skew` precedes the
+ * month start, so the window clamps to zero width. Month-to-date spend is zero
+ * at that point anyway.
  */
 export function currentMonthWindow(now: Date = new Date()): { start: string; end: string } {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+  const end = new Date(Math.max(start.getTime(), now.getTime() - END_SKEW_MS));
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
+/**
+ * The default-window usage path. Shared with `fa_get_account_usage` so both
+ * spell the query identically — same encoding, same cache key.
+ */
+export function usagePath(window = currentMonthWindow()): string {
+  const params = new URLSearchParams({ start: window.start, end: window.end });
+  return `${USAGE_PATH}?${params.toString()}`;
 }
 
 /** Pull the first present numeric field from a set of plausible aliases. */
@@ -178,14 +213,14 @@ async function readUsage(): Promise<Memo> {
     let reading: UsageReading | null = null;
     let failure: string | null = null;
     try {
-      const window = currentMonthWindow();
-      const data = await client.get(`${USAGE_PATH}?start=${window.start}&end=${window.end}`);
+      const data = await client.get(usagePath());
       reading = parseUsage(data);
       if (!reading) failure = `${USAGE_PATH} returned a shape this server does not recognise`;
     } catch (err) {
       failure = err instanceof Error ? err.message : String(err);
     }
     memo = { reading, failure, at: Date.now() };
+    if (reading) lastGood = { reading, at: memo.at };
     return memo;
   })();
   try {
@@ -213,6 +248,24 @@ export async function enforceSpendLimit(): Promise<void> {
 
   if (!reading || reading.cost === undefined) {
     if (parseBoolEnv('AEROAPI_ALLOW_UNVERIFIED_SPEND', { env: envSource() })) return;
+
+    // Grace window. A broken meter should not take the whole server down —
+    // that amplification is exactly what a bad `end` parameter caused once
+    // already. If we have a recent reading that actually succeeded and it sat
+    // comfortably under the limit, spend cannot have crossed it in the
+    // meantime, so keep serving rather than blocking on a transient fault.
+    // This still refuses when the meter has NEVER worked, when the last good
+    // reading sat close enough to the limit to matter, or when it is stale
+    // enough that real spend could have accumulated behind it.
+    if (
+      lastGood &&
+      lastGood.reading.cost !== undefined &&
+      lastGood.reading.cost < limit * GRACE_HEADROOM &&
+      Date.now() - lastGood.at < GRACE_MS
+    ) {
+      return;
+    }
+
     throw new McpToolError(
       `AeroAPI spend cannot be verified, and AEROAPI_SPEND_LIMIT is set to $${limit.toFixed(2)}, so this call was blocked before reaching AeroAPI. Reason: ${failure ?? 'no cost field in the usage response'}.`,
       {

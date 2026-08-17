@@ -7,6 +7,7 @@ import {
   resetUsageCache,
   withUsageGuard,
   spendLimitUsd,
+  usagePath,
   USAGE_PATH,
 } from '../src/usage.js';
 import { registerAccountTools } from '../src/tools/account.js';
@@ -36,6 +37,15 @@ function mockClient(usage: unknown | (() => never), tool: unknown = { operators:
     }
     return tool;
   });
+}
+
+/**
+ * Jump the clock forward so the memo expires while `lastGood` (which only ages
+ * out after the 15-minute grace window) survives.
+ */
+function advanceClock(ms: number) {
+  const base = Date.now();
+  vi.spyOn(Date, 'now').mockReturnValue(base + ms);
 }
 
 describe('parseUsage', () => {
@@ -91,13 +101,37 @@ describe('formatUsage', () => {
 });
 
 describe('currentMonthWindow', () => {
-  it('ends TOMORROW so an exclusive end bound cannot drop today\'s spend', () => {
-    expect(currentMonthWindow(new Date('2026-08-17T09:00:00Z'))).toEqual({ start: '2026-08-01', end: '2026-08-18' });
+  it('sends datetimes, with end a minute in the PAST', () => {
+    // Verified live: AeroAPI 400s on any end >= now, and a bare date is read as
+    // midnight (dropping all of today). Both bounds must be datetimes, and end
+    // must trail now.
+    expect(currentMonthWindow(new Date('2026-08-17T09:00:00Z'))).toEqual({
+      start: '2026-08-01T00:00:00.000Z',
+      end: '2026-08-17T08:59:00.000Z',
+    });
   });
 
-  it('rolls over month and year boundaries', () => {
-    expect(currentMonthWindow(new Date('2026-08-31T23:00:00Z'))).toEqual({ start: '2026-08-01', end: '2026-09-01' });
-    expect(currentMonthWindow(new Date('2026-12-31T12:00:00Z'))).toEqual({ start: '2026-12-01', end: '2027-01-01' });
+  it('NEVER sends an end in the future — the bug that took every tool offline', () => {
+    for (const iso of ['2026-08-17T09:00:00Z', '2026-08-31T23:59:59Z', '2026-12-31T12:00:00Z', '2026-02-01T00:00:30Z']) {
+      const now = new Date(iso);
+      const { start, end } = currentMonthWindow(now);
+      expect(new Date(end).getTime()).toBeLessThan(now.getTime());
+      expect(new Date(end).getTime()).toBeGreaterThanOrEqual(new Date(start).getTime());
+    }
+  });
+
+  it('clamps to the month start inside the first minute of a month', () => {
+    expect(currentMonthWindow(new Date('2026-09-01T00:00:30Z'))).toEqual({
+      start: '2026-09-01T00:00:00.000Z',
+      end: '2026-09-01T00:00:00.000Z',
+    });
+  });
+
+  it('keeps the window inside the current month across a rollover', () => {
+    expect(currentMonthWindow(new Date('2026-08-31T23:30:00Z'))).toEqual({
+      start: '2026-08-01T00:00:00.000Z',
+      end: '2026-08-31T23:29:00.000Z',
+    });
   });
 });
 
@@ -239,6 +273,59 @@ describe('spend gate', () => {
   });
 });
 
+describe('spend gate — grace on a broken meter', () => {
+  it('keeps serving on a transient failure when a recent good reading was well under', async () => {
+    // A broken meter must not take the whole server down: that amplification
+    // is what turned one bad date parameter into an outage of all 34 tools.
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    let healthy = true;
+    vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
+      if (path.startsWith(USAGE_PATH)) {
+        if (!healthy) throw new Error('400 start or end datetime must be before current datetime');
+        return { total_cost: 0.5 };
+      }
+      return { operators: ['ok'] };
+    });
+    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBeFalsy();
+
+    healthy = false;
+    advanceClock(301_000); // past the 300s success TTL, inside the 900s grace
+    expect((await h.callTool('fa_get_operator', { id: 'DAL' })).isError).toBeFalsy();
+    await h.close();
+  });
+
+  it('still blocks when the meter has NEVER produced a reading', async () => {
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    mockClient(() => {
+      throw new Error('400 bad window');
+    });
+    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
+    await h.close();
+  });
+
+  it('still blocks when the last good reading was close to the limit', async () => {
+    // No headroom means spend could genuinely have crossed while blind.
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    let healthy = true;
+    vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
+      if (path.startsWith(USAGE_PATH)) {
+        if (!healthy) throw new Error('500 meter down');
+        return { total_cost: 4.8 }; // inside the 10% headroom band
+      }
+      return { operators: ['ok'] };
+    });
+    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBeFalsy();
+
+    healthy = false;
+    advanceClock(301_000); // past the 300s success TTL, inside the 900s grace
+    expect((await h.callTool('fa_get_operator', { id: 'DAL' })).isError).toBe(true);
+    await h.close();
+  });
+});
+
 describe('spend gate vs. confirm-gated writes', () => {
   it('a dry-run preview makes NO network call, even with the gate armed', async () => {
     // fa_delete_alert's own description promises this. The guard must not add a
@@ -351,9 +438,7 @@ describe('fa_get_account_usage', () => {
     const get = vi.spyOn(client, 'get').mockResolvedValue({ total_cost: 1 });
     const h = await createTestHarness(registerAccountTools);
     await h.callTool('fa_get_account_usage', {});
-    const path = String(get.mock.calls[0][0]);
-    expect(path).toContain(USAGE_PATH);
-    expect(path).toContain(`start=${currentMonthWindow().start}`);
+    expect(String(get.mock.calls[0][0])).toBe(usagePath());
     await h.close();
   });
 });

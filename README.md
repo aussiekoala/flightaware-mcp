@@ -58,7 +58,9 @@ Set `AEROAPI_SPEND_LIMIT` (USD) and the reading stops being advisory. Before any
 AeroAPI spend limit reached: $5.00 spent this month, limit is $5.00. No AeroAPI call was made.
 ```
 
-The gate is **off unless you set the limit**, and it **fails closed**: if a limit is set and spend cannot be verified — the endpoint errors, or returns a shape this server doesn't recognise — calls are blocked rather than waved through on an assumption, because an unverifiable budget is not a satisfied budget. `AEROAPI_ALLOW_UNVERIFIED_SPEND=true` opts out if your tier doesn't expose `/account/usage`.
+The gate is **off unless you set the limit**, and it **fails closed**: if a limit is set and spend cannot be verified — the endpoint errors, or returns a shape this server doesn't recognise — calls are blocked rather than waved through, because an unverifiable budget is not a satisfied budget. `AEROAPI_ALLOW_UNVERIFIED_SPEND=true` opts out entirely if your tier doesn't expose `/account/usage`.
+
+**With one deliberate exception.** A broken meter shouldn't take down the whole server — an earlier bug sent a malformed date, the usage read `400`d, and fail-closed turned that into an outage of all 34 tools. So if a reading *did* succeed within the last 15 minutes and it sat below 90% of the limit, calls keep flowing while the meter is unavailable: spend can't have crossed the line in that window from that starting point. The gate still refuses outright when the meter has **never** worked, when the last good reading was close to the limit, or when it's too stale to reason from.
 
 `fa_get_account_usage` is never gated, so you can always ask why you're blocked.
 
