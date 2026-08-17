@@ -73,10 +73,19 @@ export function primeUsage(data: unknown): void {
   memo = { reading, failure: null, at: Date.now() };
 }
 
-/** First-of-month → today, in UTC, as ISO dates. The window the credit resets on. */
+/**
+ * The current billing window in UTC: first of the month → **tomorrow**.
+ *
+ * The end date is deliberately one day ahead of today. AeroAPI's `end` is
+ * treated as exclusive, so `end = today` reports everything except today —
+ * which for a spend gate is the worst possible error, silently omitting the
+ * most recent (and most likely to matter) spend. Asking for tomorrow costs
+ * nothing if the bound is inclusive, since there is no future usage to return.
+ */
 export function currentMonthWindow(now: Date = new Date()): { start: string; end: string } {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  return { start: start.toISOString().slice(0, 10), end: now.toISOString().slice(0, 10) };
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
 /** Pull the first present numeric field from a set of plausible aliases. */
@@ -94,10 +103,19 @@ function num(source: Record<string, unknown>, ...keys: string[]): number | undef
  * Read cost/calls out of an /account/usage payload, or `null` if the shape
  * isn't recognised.
  *
- * **[verify-pending]** — the real response shape has not been confirmed against
- * a live 200 (see docs/FLIGHTAWARE-API.md). Returning null on an unknown shape
- * is deliberate: reporting prints nothing rather than a fabricated number, and
- * the gate treats it as "cannot verify" rather than "you're fine".
+ * Confirmed against a real 200 (2026-08-17): AeroAPI returns `total_calls`,
+ * `total_pages`, `total_cost`, `total_discount_cost`, `total_successful_calls`,
+ * `total_failed_calls` and a `resource_details[]` breakdown.
+ *
+ * We gate on **`total_cost`, the gross figure**, deliberately ignoring
+ * `total_discount_cost`. Its exact semantics are unclear from an all-zero
+ * response — it may be the amount already covered by credit — and for a budget
+ * the safe direction is to over-count, blocking slightly early rather than
+ * letting spend through on an optimistic reading.
+ *
+ * The aliases below are kept as a fallback: returning null on an unknown shape
+ * means reporting prints nothing rather than a fabricated number, and the gate
+ * reads it as "cannot verify" rather than "you're fine".
  */
 export function parseUsage(data: unknown): UsageReading | null {
   if (!data || typeof data !== 'object') return null;

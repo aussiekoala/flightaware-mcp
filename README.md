@@ -67,7 +67,7 @@ Two things to understand about the guarantee:
 - **Enforcement granularity is the memo window.** Spend is re-read once per `AEROAPI_USAGE_TTL` (default 300s), not once per call, so the ceiling holds to within one window of activity. Shorten the TTL to tighten it, at the cost of more usage queries.
 - **This is a client-side gate.** It stops *this server* from spending. Only a cap in the [AeroAPI portal](https://www.flightaware.com/aeroapi/portal/) stops the billing itself — set both if the ceiling really matters.
 
-The `/account/usage` response shape is still **[verify-pending]** (see `docs/FLIGHTAWARE-API.md`). Confirm the footer appears on a real key before turning the gate on; with the shape unpinned and the gate enabled, fail-closed means everything blocks.
+The `/account/usage` response shape is **pinned against a live response** (see `docs/FLIGHTAWARE-API.md`): the gate reads `total_cost`, the gross figure, and the query window ends *tomorrow* because AeroAPI treats `end` as exclusive — `end = today` would silently omit today's spend.
 
 ## Configuration
 

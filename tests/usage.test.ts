@@ -39,7 +39,28 @@ function mockClient(usage: unknown | (() => never), tool: unknown = { operators:
 }
 
 describe('parseUsage', () => {
-  it('reads the documented and aliased field names', () => {
+  it('reads AeroAPI\'s real /account/usage payload', () => {
+    // Captured from a live 200 on 2026-08-17 (Personal tier, empty month).
+    expect(
+      parseUsage({
+        total_calls: 12,
+        total_pages: 12,
+        total_cost: 0.42,
+        total_discount_cost: 0.1,
+        total_successful_calls: 11,
+        total_failed_calls: 1,
+        resource_details: [],
+      }),
+    ).toEqual({ cost: 0.42, calls: 12 });
+  });
+
+  it('handles an all-zero month without reading it as "unknown"', () => {
+    // $0 spent is a perfectly good answer and must not be mistaken for a
+    // failure to parse — that distinction is what the gate turns on.
+    expect(parseUsage({ total_calls: 0, total_cost: 0, resource_details: [] })).toEqual({ cost: 0, calls: 0 });
+  });
+
+  it('reads the aliased field names as a fallback', () => {
     expect(parseUsage({ total_cost: 1.5, total_calls: 9 })).toEqual({ cost: 1.5, calls: 9 });
     expect(parseUsage({ cost: '2.25' })).toEqual({ cost: 2.25, calls: undefined });
   });
@@ -70,8 +91,13 @@ describe('formatUsage', () => {
 });
 
 describe('currentMonthWindow', () => {
-  it('spans first-of-month to today in UTC', () => {
-    expect(currentMonthWindow(new Date('2026-08-17T09:00:00Z'))).toEqual({ start: '2026-08-01', end: '2026-08-17' });
+  it('ends TOMORROW so an exclusive end bound cannot drop today\'s spend', () => {
+    expect(currentMonthWindow(new Date('2026-08-17T09:00:00Z'))).toEqual({ start: '2026-08-01', end: '2026-08-18' });
+  });
+
+  it('rolls over month and year boundaries', () => {
+    expect(currentMonthWindow(new Date('2026-08-31T23:00:00Z'))).toEqual({ start: '2026-08-01', end: '2026-09-01' });
+    expect(currentMonthWindow(new Date('2026-12-31T12:00:00Z'))).toEqual({ start: '2026-12-01', end: '2027-01-01' });
   });
 });
 

@@ -33,12 +33,12 @@ enabled = true
 AEROAPI_CACHE_TTL = "15"
 AEROAPI_STATIC_CACHE_TTL = "3600"
 
-# Hard spend ceiling in USD — the Personal tier's included credit. Uncomment to
-# arm it: tool calls are then refused at or over this month's spend, before any
-# AeroAPI request is made.
+# ARMED — hard spend ceiling in USD, set to the Personal tier's included credit.
+# Tool calls are refused at or over this month's spend, before any AeroAPI
+# request is made. Safe to arm because /account/usage is now pinned against a
+# real response (docs/FLIGHTAWARE-API.md) — the gate fails closed, so arming it
+# against an unparseable shape would have blocked every tool.
 #
-# Do NOT uncomment until fa_get_account_usage has been run once against a real
-# key and the usage footer renders. The gate fails closed by design, and
-# /account/usage is still [verify-pending] — arming it against a response shape
-# this server cannot parse would block every tool.
-# AEROAPI_SPEND_LIMIT = "5"
+# Raise this if you move off the Personal tier; comment it out to go back to
+# reporting-only.
+AEROAPI_SPEND_LIMIT = "5"

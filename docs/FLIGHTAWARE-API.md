@@ -84,17 +84,40 @@ never cached.
   means a bad/missing key; `402`/`403` typically means the endpoint/feature is
   not in your subscription tier (notably **Foresight** and some premium boards).
 
-## Account usage — `GET /account/usage` **[verify-pending]**
+## Account usage — `GET /account/usage` **[pinned — live 2026-08-17]**
 
-Reports spend for a date window; the basis for `fa_get_account_usage` and the
-per-response usage footer. Query params `start` / `end` (ISO-8601 dates); we
-default to the current calendar month so the figure lines up with the monthly
-free credit.
+Reports spend for a date window; the basis for `fa_get_account_usage`, the
+per-response usage footer, and the `AEROAPI_SPEND_LIMIT` gate. Query params
+`start` / `end` (ISO-8601 dates).
 
-Response shape is **not yet verified against a real 200** — the parser reads
-`total_cost`/`cost` and `total_calls`/`calls` defensively and omits the footer
-entirely rather than printing a guess when neither is present. Pin this section
-the first time a real response is seen.
+Verified response (Personal tier, empty month):
+
+```json
+{
+  "total_calls": 0,
+  "total_pages": 0,
+  "total_cost": 0,
+  "total_discount_cost": 0,
+  "total_successful_calls": 0,
+  "total_failed_calls": 0,
+  "resource_details": []
+}
+```
+
+Notes that matter for the gate:
+
+- **`total_cost` is the field we gate on** — the gross figure.
+  `total_discount_cost` also exists and its semantics are not yet clear from an
+  all-zero response (plausibly the portion already covered by credit). Gating on
+  the gross number errs toward blocking early, which is the correct bias for a
+  budget. Revisit once a non-zero month is available to compare against the
+  portal's own figure.
+- **`end` is treated as exclusive**, so `currentMonthWindow()` asks for
+  *tomorrow*. `end = today` would silently omit today's spend — the newest and
+  most decision-relevant usage. Harmless if the bound turns out to be inclusive,
+  since there is no future usage to return.
+- `resource_details[]` carries the per-endpoint breakdown; `fa_get_account_usage`
+  returns it verbatim, and the footer ignores it.
 
 ## Common query params
 
