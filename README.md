@@ -58,18 +58,16 @@ Set `AEROAPI_SPEND_LIMIT` (USD) and the reading stops being advisory. Before any
 AeroAPI spend limit reached: $5.00 spent this month, limit is $5.00. No AeroAPI call was made.
 ```
 
-The gate is **off unless you set the limit**, and it **fails closed**: if a limit is set and spend cannot be verified — the endpoint errors, or returns a shape this server doesn't recognise — calls are blocked rather than waved through, because an unverifiable budget is not a satisfied budget. `AEROAPI_ALLOW_UNVERIFIED_SPEND=true` opts out entirely if your tier doesn't expose `/account/usage`.
+The rule is exactly that simple: **under the limit → approved, at or over → declined.** The freshest reading available decides — the live one when the meter answers, the last successful one when it doesn't. If no reading has ever succeeded, calls are approved rather than blocked: the meter is a free endpoint being read every few minutes, so it recovers fast, and a silent meter should not take down the whole server over pennies.
 
-**With one deliberate exception.** A broken meter shouldn't take down the whole server — an earlier bug sent a malformed date, the usage read `400`d, and fail-closed turned that into an outage of all 34 tools. So if a reading *did* succeed within the last 15 minutes and it sat below 90% of the limit, calls keep flowing while the meter is unavailable: spend can't have crossed the line in that window from that starting point. The gate still refuses outright when the meter has **never** worked, when the last good reading was close to the limit, or when it's too stale to reason from.
-
-`fa_get_account_usage` is never gated, so you can always ask why you're blocked.
+`fa_get_account_usage` is never gated, so you can always ask where you stand.
 
 Two things to understand about the guarantee:
 
 - **Enforcement granularity is the memo window.** Spend is re-read once per `AEROAPI_USAGE_TTL` (default 300s), not once per call, so the ceiling holds to within one window of activity. Shorten the TTL to tighten it, at the cost of more usage queries.
 - **This is a client-side gate.** It stops *this server* from spending. Only a cap in the [AeroAPI portal](https://www.flightaware.com/aeroapi/portal/) stops the billing itself — set both if the ceiling really matters.
 
-The `/account/usage` response shape is **pinned against a live response** (see `docs/FLIGHTAWARE-API.md`): the gate reads `total_cost`, the gross figure, and the query window ends *tomorrow* because AeroAPI treats `end` as exclusive — `end = today` would silently omit today's spend.
+The `/account/usage` request and response are **pinned against the live API** (see `docs/FLIGHTAWARE-API.md`): the gate reads `total_cost`, the gross figure, and the query window is whole-second datetimes ending a minute ago — AeroAPI 400s a future `end`, reads a bare date as midnight (dropping today), and 500s on fractional seconds.
 
 ## Configuration
 
@@ -83,7 +81,6 @@ The `/account/usage` response shape is **pinned against a live response** (see `
 | `AEROAPI_USAGE_TTL` | no | Seconds to reuse a usage reading before spending another query on it (default: 300). |
 | `AEROAPI_FREE_CREDIT` | no | Monthly credit in USD the footer measures against (default: `5`, the Personal tier). |
 | `AEROAPI_SPEND_LIMIT` | no | Hard ceiling in USD. Unset = reporting only. Set = tool calls are refused at or over this month's spend, before any AeroAPI request is made. |
-| `AEROAPI_ALLOW_UNVERIFIED_SPEND` | no | Let calls through when spend can't be verified and a limit is set (default: `false` — fail closed). |
 
 ## Hosting on Cloudflare Workers
 

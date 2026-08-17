@@ -19,7 +19,6 @@ const ENV_KEYS = [
   'AEROAPI_USAGE_FOOTER',
   'AEROAPI_FREE_CREDIT',
   'AEROAPI_SPEND_LIMIT',
-  'AEROAPI_ALLOW_UNVERIFIED_SPEND',
 ];
 
 afterEach(() => {
@@ -237,38 +236,11 @@ describe('spend gate', () => {
     await h.close();
   });
 
-  it('fails CLOSED when spend cannot be verified and a limit is set', async () => {
+  it('approves on an unparseable usage shape (nothing to compare against)', async () => {
     process.env.AEROAPI_SPEND_LIMIT = '5';
-    const get = mockClient(() => {
-      throw new Error('404 not found');
-    });
+    mockClient({ unexpected: 'shape' }, { operators: ['ok'] });
     const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    const res = await h.callTool('fa_get_operator', { id: 'UAL' });
-    expect(res.isError).toBe(true);
-    expect(JSON.stringify(res.content)).toContain('cannot be verified');
-    expect(get.mock.calls.every(([p]) => String(p).startsWith(USAGE_PATH))).toBe(true);
-    await h.close();
-  });
-
-  it('treats an unparseable usage shape as unverified, not as zero spend', async () => {
-    process.env.AEROAPI_SPEND_LIMIT = '5';
-    mockClient({ unexpected: 'shape' });
-    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    const res = await h.callTool('fa_get_operator', { id: 'UAL' });
-    expect(res.isError).toBe(true);
-    expect(JSON.stringify(res.content)).toContain('cannot be verified');
-    await h.close();
-  });
-
-  it('AEROAPI_ALLOW_UNVERIFIED_SPEND=true opts out of failing closed', async () => {
-    process.env.AEROAPI_SPEND_LIMIT = '5';
-    process.env.AEROAPI_ALLOW_UNVERIFIED_SPEND = 'true';
-    mockClient(() => {
-      throw new Error('404 not found');
-    }, { operators: ['ok'] });
-    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    const res = await h.callTool('fa_get_operator', { id: 'UAL' });
-    expect(res.isError).toBeFalsy();
+    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBeFalsy();
     await h.close();
   });
 
@@ -283,55 +255,54 @@ describe('spend gate', () => {
   });
 });
 
-describe('spend gate — grace on a broken meter', () => {
-  it('keeps serving on a transient failure when a recent good reading was well under', async () => {
-    // A broken meter must not take the whole server down: that amplification
-    // is what turned one bad date parameter into an outage of all 34 tools.
+describe('spend gate — under approved, over declined, nothing else', () => {
+  it('approves when the meter fails and no reading has ever succeeded', async () => {
+    // Nothing to compare against → approve. Three incidents proved that
+    // blocking on a silent meter takes the whole server down over pennies.
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    mockClient(() => {
+      throw new Error('500 Appfault');
+    }, { operators: ['ok'] });
+    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBeFalsy();
+    await h.close();
+  });
+
+  it('falls back to the last successful reading while the meter is down — under stays approved', async () => {
     process.env.AEROAPI_SPEND_LIMIT = '5';
     let healthy = true;
     vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
       if (path.startsWith(USAGE_PATH)) {
-        if (!healthy) throw new Error('400 start or end datetime must be before current datetime');
-        return { total_cost: 0.5 };
+        if (!healthy) throw new Error('500 Appfault');
+        return { total_cost: 4.99 };
       }
       return { operators: ['ok'] };
     });
     const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
     expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBeFalsy();
-
     healthy = false;
-    advanceClock(301_000); // past the 300s success TTL, inside the 900s grace
+    advanceClock(301_000); // memo expired, next read fails
     expect((await h.callTool('fa_get_operator', { id: 'DAL' })).isError).toBeFalsy();
     await h.close();
   });
 
-  it('still blocks when the meter has NEVER produced a reading', async () => {
-    process.env.AEROAPI_SPEND_LIMIT = '5';
-    mockClient(() => {
-      throw new Error('400 bad window');
-    });
-    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
-    await h.close();
-  });
-
-  it('still blocks when the last good reading was close to the limit', async () => {
-    // No headroom means spend could genuinely have crossed while blind.
+  it('falls back to the last successful reading while the meter is down — over stays declined', async () => {
     process.env.AEROAPI_SPEND_LIMIT = '5';
     let healthy = true;
     vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
       if (path.startsWith(USAGE_PATH)) {
-        if (!healthy) throw new Error('500 meter down');
-        return { total_cost: 4.8 }; // inside the 10% headroom band
+        if (!healthy) throw new Error('500 Appfault');
+        return { total_cost: 6 };
       }
       return { operators: ['ok'] };
     });
     const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBeFalsy();
-
+    expect((await h.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
     healthy = false;
-    advanceClock(301_000); // past the 300s success TTL, inside the 900s grace
-    expect((await h.callTool('fa_get_operator', { id: 'DAL' })).isError).toBe(true);
+    advanceClock(301_000);
+    const res = await h.callTool('fa_get_operator', { id: 'DAL' });
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toContain('spend limit reached');
     await h.close();
   });
 });
@@ -379,7 +350,8 @@ describe('usage memo', () => {
   });
 
   it('retries a failure sooner than it reuses a success', async () => {
-    // A transient blip must not hard-block the gate for the full 300s window.
+    // Failures memoise for 15s, successes for the full 300s — so a blip is
+    // re-checked quickly instead of leaving the gate blind for five minutes.
     process.env.AEROAPI_SPEND_LIMIT = '5';
     let attempts = 0;
     vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
@@ -391,56 +363,63 @@ describe('usage memo', () => {
       return { operators: [] };
     });
     const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    const blocked = await h.callTool('fa_get_operator', { id: 'UAL' });
-    expect(blocked.isError).toBe(true);
-
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 20_000); // past FAILURE_TTL, well inside the success TTL
-    const recovered = await h.callTool('fa_get_operator', { id: 'DAL' });
-    expect(recovered.isError).toBeFalsy();
+    await h.callTool('fa_get_operator', { id: 'UAL' }); // read fails; call approved anyway
+    expect(attempts).toBe(1);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 20_000); // past 15s failure TTL
+    await h.callTool('fa_get_operator', { id: 'DAL' }); // failure expired → re-read
+    expect(attempts).toBe(2);
+    await h.callTool('fa_get_operator', { id: 'AAL' }); // success memoised → no third read
+    expect(attempts).toBe(2);
     await h.close();
   });
 
-  it('fa_get_account_usage refreshes the gate, clearing a stale failure', async () => {
+
+  it('fa_get_account_usage primes the gate — an over-limit reading it fetches starts blocking', async () => {
     process.env.AEROAPI_SPEND_LIMIT = '5';
-    let fail = true;
+    let healthy = false;
     vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
       if (path.startsWith(USAGE_PATH)) {
-        if (fail) throw new Error('transient 503');
-        return { total_cost: 1 };
+        if (!healthy) throw new Error('500 Appfault');
+        return { total_cost: 6 }; // over the limit
       }
-      return { operators: [] };
+      return { operators: ['ok'] };
     });
     const gated = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    expect((await gated.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
+    // Meter down, no reading ever → approved.
+    expect((await gated.callTool('fa_get_operator', { id: 'UAL' })).isError).toBeFalsy();
 
-    // The remedy the error hint points at: check usage directly. That reading
-    // should prime the gate rather than leaving the failure memoised.
-    fail = false;
+    // The meter recovers; the account tool reads $6 and primes the gate.
+    healthy = true;
     const account = await createTestHarness(withUsageGuard(registerAccountTools) as never);
     await account.callTool('fa_get_account_usage', {});
 
-    expect((await gated.callTool('fa_get_operator', { id: 'DAL' })).isError).toBeFalsy();
+    expect((await gated.callTool('fa_get_operator', { id: 'DAL' })).isError).toBe(true);
     await gated.close();
     await account.close();
   });
+
 
   it('does not let a custom date window redefine this month\'s spend', async () => {
     process.env.AEROAPI_SPEND_LIMIT = '5';
     vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
-      // A 2020 window reporting $0 must not be mistaken for the current month.
+      // A 2020 window reporting $0 must not be mistaken for the current month,
+      // which is over the limit.
       if (path.includes('start=2020-01-01')) return { total_cost: 0 };
-      if (path.startsWith(USAGE_PATH)) throw new Error('current-month read still required');
+      if (path.startsWith(USAGE_PATH)) return { total_cost: 6 };
       return { operators: [] };
     });
+    const gated = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    expect((await gated.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
+
     const account = await createTestHarness(withUsageGuard(registerAccountTools) as never);
     await account.callTool('fa_get_account_usage', { start: '2020-01-01', end: '2020-01-31' });
 
-    // If that $0 had primed the memo, this would sail through.
-    const gated = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
-    expect((await gated.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
-    await account.close();
+    // If that $0 had primed the memo, this would now sail through.
+    expect((await gated.callTool('fa_get_operator', { id: 'DAL' })).isError).toBe(true);
     await gated.close();
+    await account.close();
   });
+
 });
 
 describe('fa_get_account_usage', () => {

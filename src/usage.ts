@@ -52,13 +52,6 @@ const FAILURE_TTL_MS = 15_000;
 /** Seconds to step `end` back from now, absorbing clock skew against AeroAPI. */
 const END_SKEW_MS = 60_000;
 
-/**
- * How long a last-known-good reading keeps the gate open after the meter
- * breaks, and how much headroom that reading needs. See {@link enforceSpendLimit}.
- */
-const GRACE_MS = 900_000;
-const GRACE_HEADROOM = 0.9;
-
 type Memo = { reading: UsageReading | null; failure: string | null; at: number };
 
 let memo: Memo | null = null;
@@ -244,52 +237,22 @@ async function readUsage(): Promise<Memo> {
 }
 
 /**
- * The spend gate. Throws (blocking the tool call before it reaches AeroAPI)
- * when the month's spend is at or over AEROAPI_SPEND_LIMIT.
- *
- * Fails CLOSED: if a limit is set and spend cannot be verified, the call is
- * blocked rather than allowed through on an assumption. That is the point of a
- * hard limit — an unverifiable budget is not a satisfied budget.
- * AEROAPI_ALLOW_UNVERIFIED_SPEND=true opts out for tiers that don't expose
- * /account/usage.
+ * The spend gate, and deliberately nothing more: **under the limit → approved,
+ * at or over → declined.** The freshest reading we have decides — the live one
+ * when the meter answers, the last successful one when it doesn't. If no
+ * reading has ever succeeded there is nothing to compare against, and the call
+ * is approved rather than blocked: three separate incidents proved that
+ * blocking on a silent meter takes the whole server down over pennies.
  */
 export async function enforceSpendLimit(): Promise<void> {
   const limit = spendLimitUsd();
   if (limit === undefined) return; // gate off — reporting only
 
-  const { reading, failure } = await readUsage();
-
-  if (!reading || reading.cost === undefined) {
-    if (parseBoolEnv('AEROAPI_ALLOW_UNVERIFIED_SPEND', { env: envSource() })) return;
-
-    // Grace window. A broken meter should not take the whole server down —
-    // that amplification is exactly what a bad `end` parameter caused once
-    // already. If we have a recent reading that actually succeeded and it sat
-    // comfortably under the limit, spend cannot have crossed it in the
-    // meantime, so keep serving rather than blocking on a transient fault.
-    // This still refuses when the meter has NEVER worked, when the last good
-    // reading sat close enough to the limit to matter, or when it is stale
-    // enough that real spend could have accumulated behind it.
-    if (
-      lastGood &&
-      lastGood.reading.cost !== undefined &&
-      lastGood.reading.cost < limit * GRACE_HEADROOM &&
-      Date.now() - lastGood.at < GRACE_MS
-    ) {
-      return;
-    }
-
+  const { reading } = await readUsage();
+  const cost = reading?.cost ?? lastGood?.reading.cost;
+  if (cost !== undefined && cost >= limit) {
     throw new McpToolError(
-      `AeroAPI spend cannot be verified, and AEROAPI_SPEND_LIMIT is set to $${limit.toFixed(2)}, so this call was blocked before reaching AeroAPI. Reason: ${failure ?? 'no cost field in the usage response'}.`,
-      {
-        hint: 'Check the key and tier with fa_get_account_usage (which is never gated). To proceed without verification set AEROAPI_ALLOW_UNVERIFIED_SPEND=true, or unset AEROAPI_SPEND_LIMIT to disable the gate.',
-      },
-    );
-  }
-
-  if (reading.cost >= limit) {
-    throw new McpToolError(
-      `AeroAPI spend limit reached: $${reading.cost.toFixed(2)} spent this month, limit is $${limit.toFixed(2)}. No AeroAPI call was made.`,
+      `AeroAPI spend limit reached: $${cost.toFixed(2)} spent this month, limit is $${limit.toFixed(2)}. No AeroAPI call was made.`,
       {
         hint: 'Raise AEROAPI_SPEND_LIMIT (or unset it to disable the gate) — otherwise the limit clears when the monthly window rolls over. On Cloudflare: `wrangler secret put AEROAPI_SPEND_LIMIT` or edit [vars] in wrangler.toml.',
       },

@@ -35,8 +35,7 @@ AEROAPI_STATIC_CACHE_TTL=<secs> # Optional. Reference-data read-cache TTL (defau
 AEROAPI_USAGE_FOOTER=false      # Optional. Turn off the per-result spend line (default on)
 AEROAPI_USAGE_TTL=<secs>        # Optional. Usage-reading memo TTL (default 300)
 AEROAPI_FREE_CREDIT=<usd>       # Optional. Monthly credit the footer measures against (default 5)
-AEROAPI_SPEND_LIMIT=<usd>       # Optional. Hard ceiling — tools refuse at/over it. Unset = report only
-AEROAPI_ALLOW_UNVERIFIED_SPEND=true # Optional. Don't fail closed when spend is unreadable
+AEROAPI_SPEND_LIMIT=<usd>       # Optional. Ceiling — under it approved, at/over declined. Unset = report only
 ```
 
 `client.get(path, { cache })` is backed by an in-memory cache keyed by full
@@ -96,10 +95,11 @@ there is no separate worker build step.
 - `src/usage.ts` — usage reporting **and** the spend gate, off one memoised
   reading. `withUsageGuard` proxies a registrar's `registerTool` so every tool
   checks `AEROAPI_SPEND_LIMIT` before running and appends the spend line after.
-  Two rules pull in opposite directions and both matter: with **no** limit set a
-  usage failure is swallowed (it must never break a working call), but with a
-  limit set an unverifiable spend **fails closed** (an unverifiable budget is not
-  a satisfied budget). `fa_get_account_usage` is exempt from the gate so it stays
+  The gate is one comparison — freshest available reading under the limit →
+  approved, at/over → declined, no reading ever → approved. It deliberately does
+  NOT fail closed: three separate incidents (future `end`, bare-date `end`,
+  fractional-second `end`) each turned a malformed meter query into a full
+  server outage. `fa_get_account_usage` is exempt from the gate so it stays
   reachable while blocked.
 - `src/tools/{flights,airports,operators,aircraft,schedules,alerts,account}.ts` —
   each exports `register*Tools(server)`; `index.ts` wires them via `runMcp`.
