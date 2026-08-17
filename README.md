@@ -92,6 +92,14 @@ curl https://flightaware-mcp.<your-subdomain>.workers.dev/health
 
 AeroAPI bills per query, so a public URL carrying your key is a bill anyone can run up. Every request to `/mcp` must present `Authorization: Bearer <MCP_AUTH_TOKEN>`; anything else gets a `401`. If `MCP_AUTH_TOKEN` is not set at all, the Worker returns `503` and serves nothing rather than defaulting to open — set `MCP_ALLOW_ANONYMOUS=true` to override that, which is only sane behind Cloudflare Access or a private route.
 
+**Clients that can't send headers.** Hosted connector UIs (claude.ai, Claude Desktop) assume a remote MCP server speaks OAuth and give you nowhere to attach a static header. For those, the token may instead ride on the URL:
+
+```
+https://flightaware-mcp.<your-subdomain>.workers.dev/mcp?token=<your MCP_AUTH_TOKEN>
+```
+
+The header is checked first and remains the preferred path. Understand the trade-off before using the query string: a token in a URL is recorded in Cloudflare's request logs and stored in plaintext by whatever holds the connector config, where an `Authorization` header is not. Rotate with `wrangler secret put MCP_AUTH_TOKEN` and update the URL. If you want the proper fix rather than the pragmatic one, put [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) in front of the route, or give the Worker a real OAuth provider.
+
 ### Local development
 
 ```bash

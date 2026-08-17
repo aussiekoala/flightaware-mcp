@@ -71,6 +71,42 @@ describe('worker auth gate', () => {
   it('accepts the correct bearer token', async () => {
     expect(authorize(post({}, { token: TOKEN }), ENV)).toBeNull();
   });
+
+  it('accepts the token as a ?token= query param (for clients that cannot set headers)', async () => {
+    const req = new Request(`https://example.workers.dev/mcp?token=${TOKEN}`, { method: 'POST' });
+    expect(authorize(req, ENV)).toBeNull();
+  });
+
+  it('rejects a wrong ?token= query param', async () => {
+    const req = new Request('https://example.workers.dev/mcp?token=wrong', { method: 'POST' });
+    expect(authorize(req, ENV)?.status).toBe(401);
+  });
+
+  it('prefers the Authorization header over ?token= when both are present', async () => {
+    const req = new Request('https://example.workers.dev/mcp?token=wrong', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(authorize(req, ENV)).toBeNull();
+  });
+
+  it('still serves MCP when authenticated by query param alone', async () => {
+    const res = await worker.fetch(
+      new Request(`https://example.workers.dev/mcp?token=${TOKEN}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 0,
+          method: 'initialize',
+          params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 't', version: '1' } },
+        }),
+      }),
+      ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).result.serverInfo.name).toBe('flightaware-mcp');
+  });
 });
 
 describe('worker MCP endpoint', () => {

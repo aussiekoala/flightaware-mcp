@@ -67,7 +67,10 @@ there is no separate worker build step.
   `handleRequest` safe (the body is fully materialised, not a live stream).
 - **Fails closed**: `/mcp` needs `Authorization: Bearer $MCP_AUTH_TOKEN`; with no
   token configured it 503s rather than serving openly, because AeroAPI bills per
-  query. `MCP_ALLOW_ANONYMOUS=true` overrides.
+  query. `MCP_ALLOW_ANONYMOUS=true` overrides. `?token=` is accepted as a
+  documented-lesser fallback (header wins) purely because hosted connector UIs
+  assume OAuth and can't attach a static header — it leaks the token into request
+  logs, so don't promote it to the primary path.
 - **Worker-only env**: `MCP_AUTH_TOKEN`, `MCP_ALLOW_ANONYMOUS`. Secrets go through
   `wrangler secret put`, never `[vars]` (committed + dashboard-readable).
 - `/health` is unauthenticated and reports which secrets landed — the first thing

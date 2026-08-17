@@ -85,6 +85,23 @@ function secretsMatch(presented: string, expected: string): boolean {
 }
 
 /**
+ * Pull the presented token off the request.
+ *
+ * `Authorization: Bearer <token>` is the way to do this and what every
+ * config-file MCP client sends. The `?token=` fallback exists for one specific
+ * reason: hosted connector UIs (claude.ai / Claude Desktop) assume a server
+ * speaks OAuth and give you nowhere to attach a static header, so the URL is the
+ * only channel left. It is a genuine downgrade — query strings land in
+ * Cloudflare's request logs and in whatever config stores the URL — so the
+ * header is checked first and the fallback is documented as the lesser path.
+ */
+function presentedToken(request: Request): string | undefined {
+  const header = /^Bearer\s+(.+)$/i.exec((request.headers.get('authorization') ?? '').trim());
+  if (header?.[1]) return header[1].trim();
+  return new URL(request.url).searchParams.get('token')?.trim() || undefined;
+}
+
+/**
  * Gate the request. Returns a rejection Response, or `null` when the caller may
  * proceed. Fails CLOSED: no configured token means no service, because the
  * alternative is a public endpoint spending someone's AeroAPI quota.
@@ -98,10 +115,9 @@ export function authorize(request: Request, env: WorkerEnv): Response | null {
       'This deployment is not configured for use: no MCP_AUTH_TOKEN secret is set. Run `wrangler secret put MCP_AUTH_TOKEN` (or set MCP_ALLOW_ANONYMOUS=true to serve without auth — not recommended, AeroAPI bills per query).',
     );
   }
-  const match = /^Bearer\s+(.+)$/i.exec((request.headers.get('authorization') ?? '').trim());
-  const presented = match?.[1]?.trim();
+  const presented = presentedToken(request);
   if (!presented || !secretsMatch(presented, expected)) {
-    return rpcError(401, 'Unauthorized: send `Authorization: Bearer <MCP_AUTH_TOKEN>`.', {
+    return rpcError(401, 'Unauthorized: send `Authorization: Bearer <MCP_AUTH_TOKEN>`, or append ?token=<MCP_AUTH_TOKEN> to the URL if your client cannot set headers.', {
       'www-authenticate': 'Bearer realm="flightaware-mcp"',
     });
   }
