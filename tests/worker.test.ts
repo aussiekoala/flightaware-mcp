@@ -210,6 +210,33 @@ describe('worker routing', () => {
     expect(res.status).toBe(404);
   });
 
+  it('405s GET /mcp instead of opening a stream that can never deliver', async () => {
+    // enableJsonResponse does not apply to the transport's GET handler: it
+    // always opens an SSE stream with a keep-alive interval, which in stateless
+    // mode would leak a server, transport and timer per connection.
+    const res = await worker.fetch(
+      new Request('https://example.workers.dev/mcp', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${TOKEN}`, accept: 'text/event-stream' },
+      }),
+      ENV,
+    );
+    expect(res.status).toBe(405);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    expect(res.headers.get('allow')).toBe('POST, OPTIONS');
+  });
+
+  it('405s DELETE /mcp — stateless, so there is no session to terminate', async () => {
+    const res = await worker.fetch(
+      new Request('https://example.workers.dev/mcp', {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${TOKEN}` },
+      }),
+      ENV,
+    );
+    expect(res.status).toBe(405);
+  });
+
   it('answers the CORS preflight', async () => {
     const res = await worker.fetch(new Request('https://example.workers.dev/mcp', { method: 'OPTIONS' }), ENV);
     expect(res.status).toBe(204);

@@ -11,6 +11,7 @@ import {
 } from '../src/usage.js';
 import { registerAccountTools } from '../src/tools/account.js';
 import { registerOperatorTools } from '../src/tools/operators.js';
+import { registerAlertTools } from '../src/tools/alerts.js';
 import { client } from '../src/client.js';
 
 const ENV_KEYS = [
@@ -209,6 +210,113 @@ describe('spend gate', () => {
     expect(res.isError).toBeFalsy();
     expect(parseToolResult(res)).toEqual({ total_cost: 500 });
     await h.close();
+  });
+});
+
+describe('spend gate vs. confirm-gated writes', () => {
+  it('a dry-run preview makes NO network call, even with the gate armed', async () => {
+    // fa_delete_alert's own description promises this. The guard must not add a
+    // billed usage lookup behind it, nor refuse the offline preview.
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    const get = mockClient({ total_cost: 999 });
+    const write = vi.spyOn(client, 'write');
+    const h = await createTestHarness(withUsageGuard(registerAlertTools) as never);
+    const res = await h.callTool('fa_delete_alert', { id: 5 });
+    expect(res.isError).toBeFalsy();
+    expect(parseToolResult<{ dryRun: boolean }>(res).dryRun).toBe(true);
+    expect(get).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    await h.close();
+  });
+
+  it('but a confirmed write is still gated', async () => {
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    mockClient({ total_cost: 999 });
+    const write = vi.spyOn(client, 'write').mockResolvedValue({ status: 204 });
+    const h = await createTestHarness(withUsageGuard(registerAlertTools) as never);
+    const res = await h.callTool('fa_delete_alert', { id: 5, confirm: true });
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toContain('spend limit reached');
+    expect(write).not.toHaveBeenCalled();
+    await h.close();
+  });
+});
+
+describe('usage memo', () => {
+  it('shares one query across concurrent tool calls', async () => {
+    const get = mockClient({ total_cost: 1 });
+    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    await Promise.all([
+      h.callTool('fa_get_operator', { id: 'UAL' }),
+      h.callTool('fa_get_operator', { id: 'DAL' }),
+      h.callTool('fa_get_operator', { id: 'AAL' }),
+    ]);
+    expect(get.mock.calls.filter(([p]) => String(p).startsWith(USAGE_PATH))).toHaveLength(1);
+    await h.close();
+  });
+
+  it('retries a failure sooner than it reuses a success', async () => {
+    // A transient blip must not hard-block the gate for the full 300s window.
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    let attempts = 0;
+    vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
+      if (path.startsWith(USAGE_PATH)) {
+        attempts += 1;
+        if (attempts === 1) throw new Error('transient 503');
+        return { total_cost: 1 };
+      }
+      return { operators: [] };
+    });
+    const h = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    const blocked = await h.callTool('fa_get_operator', { id: 'UAL' });
+    expect(blocked.isError).toBe(true);
+
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 20_000); // past FAILURE_TTL, well inside the success TTL
+    const recovered = await h.callTool('fa_get_operator', { id: 'DAL' });
+    expect(recovered.isError).toBeFalsy();
+    await h.close();
+  });
+
+  it('fa_get_account_usage refreshes the gate, clearing a stale failure', async () => {
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    let fail = true;
+    vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
+      if (path.startsWith(USAGE_PATH)) {
+        if (fail) throw new Error('transient 503');
+        return { total_cost: 1 };
+      }
+      return { operators: [] };
+    });
+    const gated = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    expect((await gated.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
+
+    // The remedy the error hint points at: check usage directly. That reading
+    // should prime the gate rather than leaving the failure memoised.
+    fail = false;
+    const account = await createTestHarness(withUsageGuard(registerAccountTools) as never);
+    await account.callTool('fa_get_account_usage', {});
+
+    expect((await gated.callTool('fa_get_operator', { id: 'DAL' })).isError).toBeFalsy();
+    await gated.close();
+    await account.close();
+  });
+
+  it('does not let a custom date window redefine this month\'s spend', async () => {
+    process.env.AEROAPI_SPEND_LIMIT = '5';
+    vi.spyOn(client, 'get').mockImplementation(async (path: string) => {
+      // A 2020 window reporting $0 must not be mistaken for the current month.
+      if (path.includes('start=2020-01-01')) return { total_cost: 0 };
+      if (path.startsWith(USAGE_PATH)) throw new Error('current-month read still required');
+      return { operators: [] };
+    });
+    const account = await createTestHarness(withUsageGuard(registerAccountTools) as never);
+    await account.callTool('fa_get_account_usage', { start: '2020-01-01', end: '2020-01-31' });
+
+    // If that $0 had primed the memo, this would sail through.
+    const gated = await createTestHarness(withUsageGuard(registerOperatorTools) as never);
+    expect((await gated.callTool('fa_get_operator', { id: 'UAL' })).isError).toBe(true);
+    await account.close();
+    await gated.close();
   });
 });
 

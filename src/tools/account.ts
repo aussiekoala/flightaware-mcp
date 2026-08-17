@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { textResult } from '@chrischall/mcp-utils';
 import { client } from '../client.js';
 import { qs } from './shared.js';
-import { currentMonthWindow, USAGE_PATH } from '../usage.js';
+import { currentMonthWindow, primeUsage, USAGE_PATH } from '../usage.js';
 
 export function registerAccountTools(server: McpServer): void {
   server.registerTool(
@@ -20,6 +20,12 @@ export function registerAccountTools(server: McpServer): void {
     async ({ start, end }) => {
       const window = currentMonthWindow();
       const data = await client.get(`${USAGE_PATH}${qs({ start: start ?? window.start, end: end ?? window.end })}`);
+      // Refresh the spend gate from this reading, but only when it covers the
+      // default window — a caller inspecting some other date range must not
+      // redefine "this month's spend". This is what makes the gate's error
+      // hint ("check with fa_get_account_usage") actually clear a stale
+      // failure instead of just describing one.
+      if (start === undefined && end === undefined) primeUsage(data);
       return textResult(data);
     },
   );

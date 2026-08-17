@@ -1,12 +1,19 @@
 /**
- * Cloudflare Workers entrypoint — the same 33 tools as the stdio server, served
- * over MCP Streamable HTTP at `POST /mcp`.
+ * Cloudflare Workers entrypoint — the same tool roster as the stdio server
+ * (`TOOL_COUNT`), served over MCP Streamable HTTP at `POST /mcp`.
  *
  * Shape: **stateless**. Each request builds its own McpServer + transport, runs
  * one JSON-RPC exchange, and tears them down; no session state survives between
  * requests, so any isolate can serve any request and nothing needs Durable
- * Objects. `enableJsonResponse` keeps replies as plain JSON bodies instead of
- * SSE streams, which is what makes that teardown safe (see `withMcpServer`).
+ * Objects. `enableJsonResponse` keeps POST replies as plain JSON bodies instead
+ * of SSE streams, which is what makes that teardown safe (see `handleMcp`).
+ *
+ * Only POST reaches the transport. `enableJsonResponse` does NOT apply to the
+ * transport's GET handler — that always opens an SSE stream with a keep-alive
+ * interval — and in stateless mode a server-initiated stream can never carry
+ * anything, so it would be a leaked server, transport and timer per connection.
+ * GET and DELETE are answered 405 here instead, which is also what the spec
+ * prescribes for a server that offers no standalone stream and no sessions.
  *
  * Guarding this endpoint matters more than usual: AeroAPI bills per query, so an
  * unauthenticated public URL is a bill someone else can run up. Requests must
@@ -148,11 +155,11 @@ async function handleMcp(request: Request): Promise<Response> {
   let response: Response;
   try {
     response = await transport.handleRequest(request);
-  } catch (err) {
-    await server.close().catch(() => {});
-    throw err;
-  }
-  if (!response.headers.get('content-type')?.includes('text/event-stream')) {
+  } finally {
+    // Unconditional: only POST gets here, and in JSON-response mode its body is
+    // fully materialised before handleRequest resolves, so there is no stream
+    // left to truncate. Anything that could stream is rejected before this
+    // point.
     await server.close().catch(() => {});
   }
   const headers = new Headers(response.headers);
@@ -199,6 +206,14 @@ export default {
 
     const denied = authorize(request, env);
     if (denied) return denied;
+
+    // Stateless: no standalone SSE stream to open, no session to delete. Say so
+    // rather than letting the transport open a stream that can never deliver.
+    if (request.method !== 'POST') {
+      return rpcError(405, `Method ${request.method} not allowed: this deployment is stateless and serves MCP over POST ${MCP_PATH} only.`, {
+        allow: 'POST, OPTIONS',
+      });
+    }
 
     return handleMcp(request);
   },

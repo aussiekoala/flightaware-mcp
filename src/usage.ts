@@ -42,11 +42,35 @@ export interface UsageReading {
   calls?: number;
 }
 
-let memo: { reading: UsageReading | null; failure: string | null; at: number } | null = null;
+/**
+ * A failed reading is held for far less time than a good one. With the gate
+ * armed a failure blocks every tool, so caching a blip for the full 300s would
+ * turn one bad response into five minutes of downtime.
+ */
+const FAILURE_TTL_MS = 15_000;
+
+type Memo = { reading: UsageReading | null; failure: string | null; at: number };
+
+let memo: Memo | null = null;
+/** The read currently in flight, so parallel tool calls share one query. */
+let inFlight: Promise<Memo> | null = null;
 
 /** Reset the memoised reading (test hook). */
 export function resetUsageCache(): void {
   memo = null;
+  inFlight = null;
+}
+
+/**
+ * Seed the memo from a reading someone else already paid for — used by
+ * `fa_get_account_usage` so that calling it (the remedy the gate's error
+ * message points at) actually refreshes the gate rather than leaving a stale
+ * failure in place.
+ */
+export function primeUsage(data: unknown): void {
+  const reading = parseUsage(data);
+  if (!reading) return;
+  memo = { reading, failure: null, at: Date.now() };
 }
 
 /** First-of-month → today, in UTC, as ISO dates. The window the credit resets on. */
@@ -118,23 +142,39 @@ export function spendLimitUsd(): number | undefined {
 }
 
 /** Fetch (or reuse) the current month's usage. Never throws. */
-async function readUsage(): Promise<{ reading: UsageReading | null; failure: string | null }> {
+async function readUsage(): Promise<Memo> {
   const ttlMs = readTtlMsEnv('AEROAPI_USAGE_TTL', DEFAULT_USAGE_TTL_MS, { env: envSource() });
   const now = Date.now();
-  if (memo && ttlMs > 0 && now - memo.at < ttlMs) return memo;
-
-  let reading: UsageReading | null = null;
-  let failure: string | null = null;
-  try {
-    const window = currentMonthWindow();
-    const data = await client.get(`${USAGE_PATH}?start=${window.start}&end=${window.end}`);
-    reading = parseUsage(data);
-    if (!reading) failure = `${USAGE_PATH} returned a shape this server does not recognise`;
-  } catch (err) {
-    failure = err instanceof Error ? err.message : String(err);
+  if (memo && ttlMs > 0) {
+    // Successes are held for the full TTL; failures for a much shorter one, so
+    // a transient error can't hard-block the gate for the whole window.
+    const age = now - memo.at;
+    const limit = memo.failure === null ? ttlMs : Math.min(ttlMs, FAILURE_TTL_MS);
+    if (age < limit) return memo;
   }
-  memo = { reading, failure, at: now };
-  return memo;
+  // Share one query across concurrent callers: without this, N parallel tool
+  // calls each bill their own usage read.
+  if (inFlight) return inFlight;
+
+  inFlight = (async () => {
+    let reading: UsageReading | null = null;
+    let failure: string | null = null;
+    try {
+      const window = currentMonthWindow();
+      const data = await client.get(`${USAGE_PATH}?start=${window.start}&end=${window.end}`);
+      reading = parseUsage(data);
+      if (!reading) failure = `${USAGE_PATH} returned a shape this server does not recognise`;
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    }
+    memo = { reading, failure, at: Date.now() };
+    return memo;
+  })();
+  try {
+    return await inFlight;
+  } finally {
+    inFlight = null;
+  }
 }
 
 /**
@@ -186,6 +226,22 @@ async function appendUsage(result: CallToolResult): Promise<CallToolResult> {
 type ToolHandler = (...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
 
 /**
+ * Does this tool's schema carry a `confirm` flag? Confirm-gated writes promise,
+ * in their own description, that without `confirm: true` they make NO network
+ * call — so the guard must not add one behind their back.
+ */
+function isConfirmGated(config: unknown): boolean {
+  const schema = (config as { inputSchema?: Record<string, unknown> } | undefined)?.inputSchema;
+  return !!schema && Object.prototype.hasOwnProperty.call(schema, 'confirm');
+}
+
+/** A dry-run call on a confirm-gated tool: no confirm:true, so nothing bills. */
+function isDryRun(args: unknown[]): boolean {
+  const first = args[0] as { confirm?: unknown } | undefined;
+  return !first || first.confirm !== true;
+}
+
+/**
  * Wrap a registrar so every tool it registers checks the spend limit before
  * doing its work, and reports usage after.
  *
@@ -203,9 +259,15 @@ export function withUsageGuard(register: ToolRegistrar): ToolRegistrar {
           return typeof value === 'function' ? value.bind(target) : value;
         }
         return (name: string, config: unknown, handler: ToolHandler) => {
+          const confirmGated = isConfirmGated(config);
           const wrapped: ToolHandler = UNGATED.has(name)
             ? handler
             : async (...args: unknown[]) => {
+                // A dry-run preview on a confirm-gated write must stay entirely
+                // offline — its description promises "makes NO network call",
+                // and a usage lookup (billed, and refusable when the gate is
+                // armed) would break that promise in both directions.
+                if (confirmGated && isDryRun(args)) return handler(...args);
                 // Gate first: an over-budget call must cost nothing.
                 await enforceSpendLimit();
                 return appendUsage(await handler(...args));
