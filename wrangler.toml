@@ -32,3 +32,13 @@ enabled = true
 # difference between one billed call and twenty. Seconds; "0" disables.
 AEROAPI_CACHE_TTL = "15"
 AEROAPI_STATIC_CACHE_TTL = "3600"
+
+# Hard spend ceiling in USD — the Personal tier's included credit. Uncomment to
+# arm it: tool calls are then refused at or over this month's spend, before any
+# AeroAPI request is made.
+#
+# Do NOT uncomment until fa_get_account_usage has been run once against a real
+# key and the usage footer renders. The gate fails closed by design, and
+# /account/usage is still [verify-pending] — arming it against a response shape
+# this server cannot parse would block every tool.
+# AEROAPI_SPEND_LIMIT = "5"
